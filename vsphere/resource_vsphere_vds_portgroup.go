@@ -220,7 +220,6 @@ func resourceVSphereVdPortgroupRead(d *schema.ResourceData, meta interface{}) er
 
 	netRef, err := findNetObjectByName(dcName, pgName, client)
 	if err != nil {
-		d.SetId("")
 		return err
 	}
 	if netRef == nil {
