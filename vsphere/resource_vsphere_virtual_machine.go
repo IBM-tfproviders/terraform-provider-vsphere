@@ -1626,13 +1626,13 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 		},
 		CloneSpec: &types.VirtualMachineCloneSpec{
 			Location: types.VirtualMachineRelocateSpec{
-				Disk: []types.VirtualMachineRelocateSpecDiskLocator{
+				/*Disk: []types.VirtualMachineRelocateSpecDiskLocator{
 					{
 						Datastore:       ds.Reference(),
 						DiskBackingInfo: &types.VirtualDiskFlatVer2BackingInfo{},
 						DiskId:          key,
 					},
-				},
+				},*/
 				Pool: &rpr,
 			},
 			PowerOn:  false,
