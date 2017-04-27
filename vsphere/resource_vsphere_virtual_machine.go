@@ -1607,7 +1607,10 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 	ds := object.NewDatastore(c.Client, o.Datastore[0])
 	log.Printf("[DEBUG] findDatastore: datastore: %#v\n", ds)
 
-	devices, err := vm.Device(context.TODO())
+	// Do not populate source disk details from template or vm 
+	// into StoragePlacementSpec as recommentDatastore fails to 
+	// recommend datastore for target vm.
+	/*devices, err := vm.Device(context.TODO())
 	if err != nil {
 		return types.StoragePlacementSpec{}
 	}
@@ -1616,7 +1619,7 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 	for _, d := range devices.SelectByType((*types.VirtualDisk)(nil)) {
 		key = int32(d.GetVirtualDevice().Key)
 		log.Printf("[DEBUG] findDatastore: virtual devices: %#v\n", d.GetVirtualDevice())
-	}
+	}*/
 
 	sps := types.StoragePlacementSpec{
 		Type: "clone",
