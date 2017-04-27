@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/IBM-tfproviders/vmware-vsphere/provider_vsphere"
+	"github.com/IBM-tfproviders/vmware-vsphere/vsphere"
 	"github.com/hashicorp/terraform/plugin"
 )
 
