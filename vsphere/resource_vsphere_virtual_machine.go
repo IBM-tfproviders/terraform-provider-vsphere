@@ -1607,19 +1607,9 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 	ds := object.NewDatastore(c.Client, o.Datastore[0])
 	log.Printf("[DEBUG] findDatastore: datastore: %#v\n", ds)
 
-	// Do not populate source disk details from template or vm 
-	// into StoragePlacementSpec as recommentDatastore fails to 
-	// recommend datastore for target vm.
-	/*devices, err := vm.Device(context.TODO())
-	if err != nil {
-		return types.StoragePlacementSpec{}
-	}
-
-	var key int32
-	for _, d := range devices.SelectByType((*types.VirtualDisk)(nil)) {
-		key = int32(d.GetVirtualDevice().Key)
-		log.Printf("[DEBUG] findDatastore: virtual devices: %#v\n", d.GetVirtualDevice())
-	}*/
+	// Populating the target disk/datastore information into StoragePlacementSpec 
+	// for recommendDatastore conflicts with the purpose. We specify the source VM Ref as 
+	// well as the PlacementType - Clone and this is sufficient to get the recommendation
 
 	sps := types.StoragePlacementSpec{
 		Type: "clone",
@@ -1629,13 +1619,6 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 		},
 		CloneSpec: &types.VirtualMachineCloneSpec{
 			Location: types.VirtualMachineRelocateSpec{
-				/*Disk: []types.VirtualMachineRelocateSpecDiskLocator{
-					{
-						Datastore:       ds.Reference(),
-						DiskBackingInfo: &types.VirtualDiskFlatVer2BackingInfo{},
-						DiskId:          key,
-					},
-				},*/
 				Pool: &rpr,
 			},
 			PowerOn:  false,
