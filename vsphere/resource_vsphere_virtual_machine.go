@@ -486,18 +486,6 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 	// make config spec
 	configSpec := types.VirtualMachineConfigSpec{}
 
-	if d.HasChange("vcpu") {
-		configSpec.NumCPUs = int32(d.Get("vcpu").(int))
-		hasChanges = true
-		rebootRequired = true
-	}
-
-	if d.HasChange("memory") {
-		configSpec.MemoryMB = int64(d.Get("memory").(int))
-		hasChanges = true
-		rebootRequired = true
-	}
-
 	client := meta.(*govmomi.Client)
 	dc, err := getDatacenter(client, d.Get("datacenter").(string))
 	if err != nil {
@@ -509,6 +497,52 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 	vm, err := finder.VirtualMachine(context.TODO(), vmPath(d.Get("folder").(string), d.Get("name").(string)))
 	if err != nil {
 		return err
+	}
+
+	// Read the VM properties (memory and cpu hot add properties)
+	var mov mo.VirtualMachine
+	collector := property.DefaultCollector(client.Client)
+	if err := collector.RetrieveOne(context.TODO(), vm.Reference(), []string{"summary", "config"}, &mov); err != nil {
+		return err
+	}
+
+	hasCpuHotAddEnabled := *mov.Config.CpuHotAddEnabled
+	hasCpuHotRemoveEnabled := *mov.Config.CpuHotRemoveEnabled
+	hasMemoryHotAddEnabled := *mov.Config.MemoryHotAddEnabled
+
+	// Handle CPU Hot Plug Feature
+	if d.HasChange("vcpu") {
+
+		newCPUsCount := int32(d.Get("vcpu").(int))
+		oldCPUsCount := mov.Summary.Config.NumCpu
+
+		configSpec.NumCPUs = newCPUsCount
+		hasChanges = true
+
+		if newCPUsCount < oldCPUsCount {
+			if hasCpuHotRemoveEnabled == false {
+				rebootRequired = true
+			}
+		} else if hasCpuHotAddEnabled == false {
+			rebootRequired = true
+		}
+	}
+
+	// Handle Memory Hot Add Feature
+	if d.HasChange("memory") {
+
+		newMemoryMB := int64(d.Get("memory").(int))
+		oldMemoryMB := int64(mov.Summary.Config.MemorySizeMB)
+
+		configSpec.MemoryMB = newMemoryMB
+		hasChanges = true
+
+		if hasMemoryHotAddEnabled == false {
+			rebootRequired = true
+		} else if newMemoryMB < oldMemoryMB {
+			rebootRequired = true
+		}
+
 	}
 
 	if d.HasChange("disk") {
