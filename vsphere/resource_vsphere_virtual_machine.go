@@ -499,52 +499,51 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		return err
 	}
 
-        // Read the VM properties (memory and cpu hot add properties)
-        var mov mo.VirtualMachine
-        collector := property.DefaultCollector(client.Client)
-        if err := collector.RetrieveOne(context.TODO(), vm.Reference(), []string{"summary", "config"}, &mov); err != nil {
-                return err
-        }
+	// Read the VM properties (memory and cpu hot add properties)
+	var mov mo.VirtualMachine
+	collector := property.DefaultCollector(client.Client)
+	if err := collector.RetrieveOne(context.TODO(), vm.Reference(), []string{"summary", "config"}, &mov); err != nil {
+		return err
+	}
 
-        hasCpuHotAddEnabled := *mov.Config.CpuHotAddEnabled
-        hasCpuHotRemoveEnabled := *mov.Config.CpuHotRemoveEnabled
-        hasMemoryHotAddEnabled := *mov.Config.MemoryHotAddEnabled
+	hasCpuHotAddEnabled := *mov.Config.CpuHotAddEnabled
+	hasCpuHotRemoveEnabled := *mov.Config.CpuHotRemoveEnabled
+	hasMemoryHotAddEnabled := *mov.Config.MemoryHotAddEnabled
 
-        // Handle CPU Hot Plug Feature
-        if d.HasChange("vcpu") {
+	// Handle CPU Hot Plug Feature
+	if d.HasChange("vcpu") {
 
-                newCPUsCount := int32(d.Get("vcpu").(int))
-                oldCPUsCount := mov.Summary.Config.NumCpu
+		newCPUsCount := int32(d.Get("vcpu").(int))
+		oldCPUsCount := mov.Summary.Config.NumCpu
 
-                configSpec.NumCPUs = newCPUsCount
-                hasChanges = true
+		configSpec.NumCPUs = newCPUsCount
+		hasChanges = true
 
-                if newCPUsCount < oldCPUsCount {
-                         if hasCpuHotRemoveEnabled == false {
-                                rebootRequired = true
-                         }
-                } else if hasCpuHotAddEnabled == false {
-                         rebootRequired = true
-                }
-        }
+		if newCPUsCount < oldCPUsCount {
+			if hasCpuHotRemoveEnabled == false {
+				rebootRequired = true
+			}
+		} else if hasCpuHotAddEnabled == false {
+			rebootRequired = true
+		}
+	}
 
-        // Handle Memory Hot Add Feature
-        if d.HasChange("memory") {
+	// Handle Memory Hot Add Feature
+	if d.HasChange("memory") {
 
-                newMemoryMB := int64(d.Get("memory").(int))
-                oldMemoryMB := int64(mov.Summary.Config.MemorySizeMB)
+		newMemoryMB := int64(d.Get("memory").(int))
+		oldMemoryMB := int64(mov.Summary.Config.MemorySizeMB)
 
-                configSpec.MemoryMB = newMemoryMB
-                hasChanges = true
+		configSpec.MemoryMB = newMemoryMB
+		hasChanges = true
 
-                if hasMemoryHotAddEnabled == false {
-                       rebootRequired = true
-                } else if newMemoryMB < oldMemoryMB {
-                       rebootRequired = true
-                }
+		if hasMemoryHotAddEnabled == false {
+			rebootRequired = true
+		} else if newMemoryMB < oldMemoryMB {
+			rebootRequired = true
+		}
 
-        }
-
+	}
 
 	if d.HasChange("disk") {
 		hasChanges = true
