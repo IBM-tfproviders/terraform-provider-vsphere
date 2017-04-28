@@ -1607,8 +1607,8 @@ func buildStoragePlacementSpecClone(c *govmomi.Client, f *object.DatacenterFolde
 	ds := object.NewDatastore(c.Client, o.Datastore[0])
 	log.Printf("[DEBUG] findDatastore: datastore: %#v\n", ds)
 
-	// Populating the target disk/datastore information into StoragePlacementSpec 
-	// for recommendDatastore conflicts with the purpose. We specify the source VM Ref as 
+	// Populating the target disk/datastore information into StoragePlacementSpec
+	// for recommendDatastore conflicts with the purpose. We specify the source VM Ref as
 	// well as the PlacementType - Clone and this is sufficient to get the recommendation
 
 	sps := types.StoragePlacementSpec{
