@@ -8,4 +8,12 @@ build:
 
 all: deps build
 
+testacc:
+	@echo "Starting Acceptance Test..."
+	TF_ACC=1 go test ./vsphere -v $(TESTARGS) -timeout 120m
+
+fmt:
+	@echo "Running 'go fmt'..."
+	go fmt ./vsphere
+
 .PHONY: build 
