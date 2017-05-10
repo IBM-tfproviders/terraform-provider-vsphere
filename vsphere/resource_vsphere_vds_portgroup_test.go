@@ -30,14 +30,32 @@ resource "vsphere_vds_portgroup" "%s" {
     vds_name = "%s"
 }
 `
+	testAccCheckVdsConf = `
+resource "vsphere_vds_portgroup" "%s" {
+    portgroup_name = "%s"
+    datacenter = "%s"
+    vds_name = "%s"
+    portgroup_type = "%s"
+    description = "%s"
+    num_ports = "%d"
+}
+`
 )
 
 // Verify default values with minimum configuration
 //
-func TestAccVSphereVdsPortgroup_defaultValues(t *testing.T) {
+func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 	pgName := "TFT_pg1"
 	resourceName := "vsphere_vds_portgroup." + pgName
 	defPortgroupType := string(types.DistributedVirtualPortgroupPortgroupTypeEarlyBinding)
+
+    config := fmt.Sprintf(testAccCheckVdsConf_min, pgName, pgName, pgDatacenter,
+					pgVdsName)
+	log.Printf("[DEBUG] template config= %s", config)
+
+    configUpdate := fmt.Sprintf(testAccCheckVdsConf, pgName, pgName, pgDatacenter,
+					pgVdsName, defPortgroupType, "Updated by Terraform", 16)
+	log.Printf("[DEBUG] template configUpdate= %s", configUpdate)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:     func() { testAccPreCheckVdsPg(t) },
@@ -45,12 +63,7 @@ func TestAccVSphereVdsPortgroup_defaultValues(t *testing.T) {
 		CheckDestroy: testAccCheckVdsPortGroupDestroy,
 		Steps: []resource.TestStep{
 			resource.TestStep{
-				Config: fmt.Sprintf(
-					testAccCheckVdsConf_min,
-					pgName, pgName,
-					pgDatacenter,
-					pgVdsName,
-				),
+				Config: config, 
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(
 						resourceName, "portgroup_type", defPortgroupType),
@@ -58,6 +71,18 @@ func TestAccVSphereVdsPortgroup_defaultValues(t *testing.T) {
 						resourceName, "description", "Created by Terraform"),
 				),
 			},
+            resource.TestStep{
+				Config: configUpdate, 
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(
+						resourceName, "portgroup_type", defPortgroupType),
+					resource.TestCheckResourceAttr(
+						resourceName, "description", "Updated by Terraform"),
+					resource.TestCheckResourceAttr(
+						resourceName, "num_ports", "16"),
+				),
+			},
+
 		},
 	})
 }
@@ -121,7 +146,7 @@ func TestAccVSphereVdsPortgroup_validatorFunc(t *testing.T) {
 				{value: "10-20-30", expErr: "is in incorrect format"},
 				{value: "10-5030", expErr: "is out of range"},
 				{value: "5030", expErr: "is out of range"},
-				{value: "530-10", expErr: "needs to be smaller then"},
+				{value: "530-10", expErr: "needs to be smaller than"},
 				{value: "1234", successCase: true},
 				{value: "123-234", successCase: true},
 				{value: "12-34,,5-6", successCase: true},
