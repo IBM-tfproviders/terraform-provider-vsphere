@@ -11,11 +11,12 @@ import (
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
 )
 
-var portgroupTypesList = []string {
+var portgroupTypesList = []string{
 	string(types.DistributedVirtualPortgroupPortgroupTypeEarlyBinding),
 	string(types.DistributedVirtualPortgroupPortgroupTypeLateBinding),
 	string(types.DistributedVirtualPortgroupPortgroupTypeEphemeral),
@@ -37,7 +38,7 @@ const (
 	pgInventoryPath = "%s/network/%s"
 )
 
-var vlanTypeList = []string {
+var vlanTypeList = []string{
 	string(portgroupVlanTypeNone),
 	string(portgroupVlanTypeVlan),
 	string(portgroupVlanTypePVid),
@@ -157,30 +158,7 @@ func resourceVSphereVdPortgroupCreate(d *schema.ResourceData, meta interface{}) 
 		NumPorts:    pg.numPorts,
 	}
 
-	portSettings := new(types.VMwareDVSPortSetting)
-
-	switch pg.vlanType {
-	case portgroupVlanTypeVlan:
-		vlanCnf := new(types.VmwareDistributedVirtualSwitchVlanIdSpec)
-		vlanCnf.VlanId = pg.vlanId
-		portSettings.Vlan = vlanCnf
-
-	case portgroupVlanTypePVid:
-		vlanCnf := new(types.VmwareDistributedVirtualSwitchPvlanSpec)
-		vlanCnf.PvlanId = pg.vlanId
-		portSettings.Vlan = vlanCnf
-
-	case portgroupVlanTypeTrunking:
-		vlanCnf := new(types.VmwareDistributedVirtualSwitchTrunkVlanSpec)
-		vlanCnf.VlanId = pg.vlanRange
-		portSettings.Vlan = vlanCnf
-
-	// Nothing to do
-	case portgroupVlanTypeNone:
-	default:
-	}
-
-	pgSpec.DefaultPortConfig = portSettings
+	pgSpec.DefaultPortConfig = setPortSettings(pg.pgVlan)
 
 	// Now call AddPortgroup API
 	//
@@ -202,7 +180,7 @@ func resourceVSphereVdPortgroupCreate(d *schema.ResourceData, meta interface{}) 
 	if pg.datacenter == "" {
 		dcName := strings.Split(dvsPortGrp.InventoryPath, "/")[0]
 		log.Printf("[INFO] Retrieve DC '%s' from inventory path %s",
-                dcName, dvsPortGrp.InventoryPath)
+			dcName, dvsPortGrp.InventoryPath)
 		d.Set("datacenter", dcName)
 	}
 
@@ -233,9 +211,83 @@ func resourceVSphereVdPortgroupRead(d *schema.ResourceData, meta interface{}) er
 }
 
 func resourceVSphereVdPortgroupUpdate(d *schema.ResourceData, meta interface{}) error {
-	log.Printf("[INFO] Updating vDS portgroup: %s", d.Get("portgroup_name").(string))
-	//client := meta.(*govmomi.Client)
-	log.Printf("[WARN] Yet to be implemented")
+
+	pg, _ := NewVdPortgroup(d)
+
+	if err := validatePortgroupConfigs(pg); err != nil {
+		log.Printf("[ERROR] Configuration validation failed.")
+		return err
+	}
+
+	pgName := pg.portgroupName
+	pgSpec := types.DVPortgroupConfigSpec{}
+
+	if d.HasChange("portgroup_name") {
+		oldpg, _ := d.GetChange("portgroup_name")
+		pgName = oldpg.(string)
+		pgSpec.Name = pg.portgroupName
+	}
+	log.Printf("[INFO] Updating vDS portgroup: %s", pgName)
+
+	client := meta.(*govmomi.Client)
+	netRef, err := findNetObjectByName(pg.datacenter, pgName, client)
+	if err != nil {
+		log.Printf("[ERROR] PortGroup '%s' object not found for update", pgName)
+		return err
+	}
+
+	if d.HasChange("portgroup_type") {
+		pgSpec.Type = pg.portgroupType
+	}
+
+	if d.HasChange("description") {
+		pgSpec.Description = pg.description
+	}
+
+	if d.HasChange("num_ports") {
+		pgSpec.NumPorts = pg.numPorts
+	}
+
+	if d.HasChange("vlan") {
+		vlancfg := parseVlan(d)
+		pgSpec.DefaultPortConfig = setPortSettings(vlancfg)
+	}
+
+	dvsPortGrp := netRef.(*object.DistributedVirtualPortgroup)
+
+	var mopg mo.DistributedVirtualPortgroup
+	err = dvsPortGrp.Properties(context.TODO(), dvsPortGrp.Reference(),
+		[]string{"config.configVersion"}, &mopg)
+	if err != nil {
+		return err
+	}
+
+	pgSpec.ConfigVersion = mopg.Config.ConfigVersion
+
+	task, err := dvsPortGrp.Reconfigure(context.TODO(), pgSpec)
+	if err != nil {
+		return err
+	}
+
+	_, err = task.WaitForResult(context.TODO(), nil)
+	if err != nil {
+		log.Printf("[ERROR] Portgroup %s updation failed.", pgName)
+		return err
+	}
+
+	if d.HasChange("portgroup_name") {
+		// Find the newly created object and set required fields.
+		//
+		netRef, err = findNetObjectByName(pg.datacenter, pg.portgroupName, client)
+		if netRef == nil || err != nil {
+			return fmt.Errorf("portgroup '%s' update is not complete.",
+				pg.portgroupName)
+		}
+
+		dvsPortGrp = netRef.(*object.DistributedVirtualPortgroup)
+		d.SetId(dvsPortGrp.InventoryPath)
+	}
+
 	return nil
 }
 
@@ -331,9 +383,15 @@ func NewVdPortgroup(d *schema.ResourceData) (*vdPortgroup, error) {
 		pg.numPorts = int32(v.(int))
 	}
 
+	pg.pgVlan = parseVlan(d)
+
+	return pg, nil
+}
+
+func parseVlan(d *schema.ResourceData) (vlancfg pgVlan) {
+
 	if vL, ok := d.GetOk("vlan"); ok {
 
-		var vlancfg pgVlan
 		vlan_infos := (vL.([]interface{}))[0].(map[string]interface{})
 
 		if v, ok := vlan_infos["type"].(string); ok && v != "" {
@@ -347,11 +405,9 @@ func NewVdPortgroup(d *schema.ResourceData) (*vdPortgroup, error) {
 		if v, ok := vlan_infos["vlan_range"].(string); ok && v != "" {
 			vlancfg.vlanRange, _ = parseVlanRange(v)
 		}
-
-		pg.pgVlan = vlancfg
 	}
 
-	return pg, nil
+	return vlancfg
 }
 
 func parseVlanRange(vlanRange string) (result []types.NumericRange, errors error) {
@@ -384,6 +440,34 @@ func parseVlanRange(vlanRange string) (result []types.NumericRange, errors error
 	}
 
 	return result, nil
+}
+
+func setPortSettings(vlan pgVlan) (portSettings *types.VMwareDVSPortSetting) {
+
+	portSettings = new(types.VMwareDVSPortSetting)
+
+	switch vlan.vlanType {
+	case portgroupVlanTypeVlan:
+		vlanCnf := new(types.VmwareDistributedVirtualSwitchVlanIdSpec)
+		vlanCnf.VlanId = vlan.vlanId
+		portSettings.Vlan = vlanCnf
+
+	case portgroupVlanTypePVid:
+		vlanCnf := new(types.VmwareDistributedVirtualSwitchPvlanSpec)
+		vlanCnf.PvlanId = vlan.vlanId
+		portSettings.Vlan = vlanCnf
+
+	case portgroupVlanTypeTrunking:
+		vlanCnf := new(types.VmwareDistributedVirtualSwitchTrunkVlanSpec)
+		vlanCnf.VlanId = vlan.vlanRange
+		portSettings.Vlan = vlanCnf
+
+	// Nothing to do
+	case portgroupVlanTypeNone:
+	default:
+	}
+
+	return portSettings
 }
 
 func validateNumPorts(v interface{}, k string) (ws []string, errors []error) {
@@ -453,7 +537,7 @@ func validateVlanRange(v interface{}, k string) (ws []string, errors []error) {
 
 		} else if v.End < v.Start {
 			errors = append(errors, fmt.Errorf(
-				"%s: %d needs to be smaller then %d",
+				"%s: %d needs to be smaller than %d",
 				k, v.Start, v.End))
 		}
 
