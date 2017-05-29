@@ -100,6 +100,7 @@ type virtualMachine struct {
 	enableDiskUUID        bool
 	windowsOptionalConfig windowsOptConfig
 	customConfigurations  map[string](types.AnyType)
+	permission            *userPermission
 }
 
 func (v virtualMachine) Path() string {
@@ -473,6 +474,7 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 					},
 				},
 			},
+			"permission": permissionSchema(),
 		},
 	}
 }
@@ -643,6 +645,14 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 			}
 		}
 	}
+	if d.HasChange("permission") {
+		perm := parseUserPermissionData(d, client)
+		err = perm.updateResourcePermission(vm.Reference())
+		if err != nil {
+			log.Printf("[ERROR] Permission update failed. Error: %s", err)
+			return err
+		}
+	}
 
 	// do nothing if there are no changes
 	if !hasChanges {
@@ -738,6 +748,10 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 
 	if v, ok := d.GetOk("enable_disk_uuid"); ok {
 		vm.enableDiskUUID = v.(bool)
+	}
+
+	if _, ok := d.GetOk("permission"); ok {
+		vm.permission = parseUserPermissionData(d, client)
 	}
 
 	if raw, ok := d.GetOk("dns_suffixes"); ok {
@@ -2154,5 +2168,14 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 			return err
 		}
 	}
+
+	if vm.permission != nil {
+		err = vm.permission.setResourcePermission(newVM.Reference())
+		if err != nil {
+			log.Printf("[ERROR] Setting permission failed. Error: %s", err)
+			return err
+		}
+	}
+
 	return nil
 }
