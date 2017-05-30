@@ -36,19 +36,6 @@ var DiskControllerTypes = []string{
 	"ide",
 }
 
-type networkInterface struct {
-	deviceName       string
-	label            string
-	ipv4Address      string
-	ipv4PrefixLength int
-	ipv4Gateway      string
-	ipv6Address      string
-	ipv6PrefixLength int
-	ipv6Gateway      string
-	adapterType      string // TODO: Make "adapter_type" argument
-	macAddress       string
-}
-
 type hardDisk struct {
 	name       string
 	size       int64
@@ -279,82 +266,7 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 				},
 			},
 
-			"network_interface": &schema.Schema{
-				Type:     schema.TypeList,
-				Required: true,
-				ForceNew: true,
-				Elem: &schema.Resource{
-					Schema: map[string]*schema.Schema{
-						"label": &schema.Schema{
-							Type:     schema.TypeString,
-							Required: true,
-							ForceNew: true,
-						},
-
-						"ip_address": &schema.Schema{
-							Type:       schema.TypeString,
-							Optional:   true,
-							Computed:   true,
-							Deprecated: "Please use ipv4_address",
-						},
-
-						"subnet_mask": &schema.Schema{
-							Type:       schema.TypeString,
-							Optional:   true,
-							Computed:   true,
-							Deprecated: "Please use ipv4_prefix_length",
-						},
-
-						"ipv4_address": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
-
-						"ipv4_prefix_length": &schema.Schema{
-							Type:     schema.TypeInt,
-							Optional: true,
-							Computed: true,
-						},
-
-						"ipv4_gateway": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
-
-						"ipv6_address": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
-
-						"ipv6_prefix_length": &schema.Schema{
-							Type:     schema.TypeInt,
-							Optional: true,
-							Computed: true,
-						},
-
-						"ipv6_gateway": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
-
-						"adapter_type": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							ForceNew: true,
-						},
-
-						"mac_address": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
-					},
-				},
-			},
+			"network_interface": networkInterfaceSchema(),
 
 			"disk": &schema.Schema{
 				Type:     schema.TypeSet,
@@ -844,50 +756,16 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	}
 
 	if vL, ok := d.GetOk("network_interface"); ok {
-		networks := make([]networkInterface, len(vL.([]interface{})))
-		for i, v := range vL.([]interface{}) {
-			network := v.(map[string]interface{})
-			networks[i].label = network["label"].(string)
-			if v, ok := network["ip_address"].(string); ok && v != "" {
-				networks[i].ipv4Address = v
+		var networks []networkInterface
+		for _, v := range vL.([]interface{}) {
+			network, err := parseNetworkInterfaceData(v)
+			if err != nil {
+				return err
 			}
-			if v, ok := d.GetOk("gateway"); ok {
-				networks[i].ipv4Gateway = v.(string)
-			}
-			if v, ok := network["subnet_mask"].(string); ok && v != "" {
-				ip := net.ParseIP(v).To4()
-				if ip != nil {
-					mask := net.IPv4Mask(ip[0], ip[1], ip[2], ip[3])
-					pl, _ := mask.Size()
-					networks[i].ipv4PrefixLength = pl
-				} else {
-					return fmt.Errorf("subnet_mask parameter is invalid.")
-				}
-			}
-			if v, ok := network["ipv4_address"].(string); ok && v != "" {
-				networks[i].ipv4Address = v
-			}
-			if v, ok := network["ipv4_prefix_length"].(int); ok && v != 0 {
-				networks[i].ipv4PrefixLength = v
-			}
-			if v, ok := network["ipv4_gateway"].(string); ok && v != "" {
-				networks[i].ipv4Gateway = v
-			}
-			if v, ok := network["ipv6_address"].(string); ok && v != "" {
-				networks[i].ipv6Address = v
-			}
-			if v, ok := network["ipv6_prefix_length"].(int); ok && v != 0 {
-				networks[i].ipv6PrefixLength = v
-			}
-			if v, ok := network["ipv6_gateway"].(string); ok && v != "" {
-				networks[i].ipv6Gateway = v
-			}
-			if v, ok := network["mac_address"].(string); ok && v != "" {
-				networks[i].macAddress = v
-			}
+			networks = append(networks, network)
 		}
 		vm.networkInterfaces = networks
-		log.Printf("[DEBUG] network_interface init: %v", networks)
+		log.Printf("[DEBUG] network_interface init: %+v", networks)
 	}
 
 	if vL, ok := d.GetOk("windows_opt_config"); ok {
@@ -1137,6 +1015,7 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 		return fmt.Errorf("Invalid disks to set: %#v", disks)
 	}
 
+	// TODO
 	networkInterfaces := make([]map[string]interface{}, 0)
 	for _, v := range mvm.Guest.Net {
 		if v.DeviceConfigId >= 0 {
@@ -1579,60 +1458,6 @@ func addCdrom(client *govmomi.Client, vm *object.VirtualMachine, datacenter *obj
 	return vm.AddDevice(context.TODO(), c)
 }
 
-// buildNetworkDevice builds VirtualDeviceConfigSpec for Network Device.
-func buildNetworkDevice(f *find.Finder, label, adapterType string, macAddress string) (*types.VirtualDeviceConfigSpec, error) {
-	network, err := f.Network(context.TODO(), "*"+label)
-	if err != nil {
-		return nil, err
-	}
-
-	backing, err := network.EthernetCardBackingInfo(context.TODO())
-	if err != nil {
-		return nil, err
-	}
-
-	var address_type string
-	if macAddress == "" {
-		address_type = string(types.VirtualEthernetCardMacTypeGenerated)
-	} else {
-		address_type = string(types.VirtualEthernetCardMacTypeManual)
-	}
-
-	if adapterType == "vmxnet3" {
-		return &types.VirtualDeviceConfigSpec{
-			Operation: types.VirtualDeviceConfigSpecOperationAdd,
-			Device: &types.VirtualVmxnet3{
-				VirtualVmxnet: types.VirtualVmxnet{
-					VirtualEthernetCard: types.VirtualEthernetCard{
-						VirtualDevice: types.VirtualDevice{
-							Key:     -1,
-							Backing: backing,
-						},
-						AddressType: address_type,
-						MacAddress:  macAddress,
-					},
-				},
-			},
-		}, nil
-	} else if adapterType == "e1000" {
-		return &types.VirtualDeviceConfigSpec{
-			Operation: types.VirtualDeviceConfigSpecOperationAdd,
-			Device: &types.VirtualE1000{
-				VirtualEthernetCard: types.VirtualEthernetCard{
-					VirtualDevice: types.VirtualDevice{
-						Key:     -1,
-						Backing: backing,
-					},
-					AddressType: address_type,
-					MacAddress:  macAddress,
-				},
-			},
-		}, nil
-	} else {
-		return nil, fmt.Errorf("Invalid network adapter type.")
-	}
-}
-
 // buildVMRelocateSpec builds VirtualMachineRelocateSpec to set a place for a new VirtualMachine.
 func buildVMRelocateSpec(rp *object.ResourcePool, ds *object.Datastore, vm *object.VirtualMachine, linkedClone bool, initType string) (types.VirtualMachineRelocateSpec, error) {
 	var key int32
@@ -1926,67 +1751,24 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 	networkDevices := []types.BaseVirtualDeviceConfigSpec{}
 	networkConfigs := []types.CustomizationAdapterMapping{}
 	for _, network := range vm.networkInterfaces {
-		// network device
-		var networkDeviceType string
+		// network device ----- TODO
+		//var networkDeviceType string
 		if vm.template == "" {
-			networkDeviceType = "e1000"
+			network.adapterType = "e1000"
 		} else {
-			networkDeviceType = "vmxnet3"
+			network.adapterType = "vmxnet3"
 		}
-		nd, err := buildNetworkDevice(finder, network.label, networkDeviceType, network.macAddress)
+		nd, err := network.buildNetworkDevice(finder)
 		if err != nil {
 			return err
 		}
 		log.Printf("[DEBUG] network device: %+v", nd.Device)
 		networkDevices = append(networkDevices, nd)
 
-		if vm.template != "" {
-			var ipSetting types.CustomizationIPSettings
-			if network.ipv4Address == "" {
-				ipSetting.Ip = &types.CustomizationDhcpIpGenerator{}
-			} else {
-				if network.ipv4PrefixLength == 0 {
-					return fmt.Errorf("Error: ipv4_prefix_length argument is empty.")
-				}
-				m := net.CIDRMask(network.ipv4PrefixLength, 32)
-				sm := net.IPv4(m[0], m[1], m[2], m[3])
-				subnetMask := sm.String()
-				log.Printf("[DEBUG] ipv4 gateway: %v\n", network.ipv4Gateway)
-				log.Printf("[DEBUG] ipv4 address: %v\n", network.ipv4Address)
-				log.Printf("[DEBUG] ipv4 prefix length: %v\n", network.ipv4PrefixLength)
-				log.Printf("[DEBUG] ipv4 subnet mask: %v\n", subnetMask)
-				ipSetting.Gateway = []string{
-					network.ipv4Gateway,
-				}
-				ipSetting.Ip = &types.CustomizationFixedIp{
-					IpAddress: network.ipv4Address,
-				}
-				ipSetting.SubnetMask = subnetMask
-			}
-
-			ipv6Spec := &types.CustomizationIPSettingsIpV6AddressSpec{}
-			if network.ipv6Address == "" {
-				ipv6Spec.Ip = []types.BaseCustomizationIpV6Generator{
-					&types.CustomizationDhcpIpV6Generator{},
-				}
-			} else {
-				log.Printf("[DEBUG] ipv6 gateway: %v\n", network.ipv6Gateway)
-				log.Printf("[DEBUG] ipv6 address: %v\n", network.ipv6Address)
-				log.Printf("[DEBUG] ipv6 prefix length: %v\n", network.ipv6PrefixLength)
-
-				ipv6Spec.Ip = []types.BaseCustomizationIpV6Generator{
-					&types.CustomizationFixedIpV6{
-						IpAddress:  network.ipv6Address,
-						SubnetMask: int32(network.ipv6PrefixLength),
-					},
-				}
-				ipv6Spec.Gateway = []string{network.ipv6Gateway}
-			}
-			ipSetting.IpV6Spec = ipv6Spec
-
-			// network config
-			config := types.CustomizationAdapterMapping{
-				Adapter: ipSetting,
+		if vm.template != "" { // TODO
+			config, err := network.buildNetworkConfig()
+			if err != nil {
+				return err
 			}
 			networkConfigs = append(networkConfigs, config)
 		}
