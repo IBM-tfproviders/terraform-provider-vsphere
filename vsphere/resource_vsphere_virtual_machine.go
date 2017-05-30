@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -553,6 +554,67 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 
 		addedDisks := newDiskSet.Difference(oldDiskSet)
 		removedDisks := oldDiskSet.Difference(newDiskSet)
+
+		log.Printf("[DEBUG] addedDisks : %#v\n", addedDisks)
+		log.Printf("[DEBUG] removedDisks : %#v\n", removedDisks)
+
+		modifiedDisks := make([]map[string]interface{}, 0)
+
+		for _, addedDiskRaw := range addedDisks.List() {
+			addedDisk, _ := addedDiskRaw.(map[string]interface{})
+			newSize := addedDisk["size"].(int)
+			ad := make(map[string]interface{})
+			for k, v := range addedDisk {
+				ad[k] = v
+			}
+			for _, removedDiskRaw := range removedDisks.List() {
+				removedDisk, _ := removedDiskRaw.(map[string]interface{})
+				rd := make(map[string]interface{})
+				for k, v := range removedDisk {
+					rd[k] = v
+				}
+				ad["uuid"], rd["uuid"] = "", ""
+				ad["key"], rd["key"] = 0, 0
+				ad["size"], rd["size"] = 0, 0
+				ok := reflect.DeepEqual(ad, rd)
+				if ok {
+					if removedDisk["size"].(int) < newSize {
+						log.Printf("[DEBUG] Mofifying the size to %d", newSize)
+						addedDisks.Remove(addedDisk)
+						removedDisks.Remove(removedDisk)
+						removedDisk["size"] = newSize
+						modifiedDisks = append(modifiedDisks, removedDisk)
+					}
+					break
+				}
+			}
+		}
+
+		log.Printf("[DEBUG] addedDisks after resize: %#v\n", addedDisks)
+		log.Printf("[DEBUG] removedDisks after resize: %#v\n", removedDisks)
+		log.Printf("[DEBUG] modifiedDisks after resize: %#v\n", modifiedDisks)
+
+		// Just Resized disks
+		for _, disk := range modifiedDisks {
+			log.Printf("[DEBUG] Modifying disk  : %#v\n", disk)
+			devices, err := vm.Device(context.TODO())
+			if err != nil {
+				return fmt.Errorf("[ERROR] Update resize Disk - Could not get virtual device list: %v", err)
+			}
+			v := devices.FindByKey(int32(disk["key"].(int)))
+			virtualDisk, _ := v.(*types.VirtualDisk)
+
+			newSize := disk["size"].(int)
+			virtualDisk.CapacityInKB = int64(newSize * 1024 * 1024)
+
+			config := &types.VirtualDeviceConfigSpec{
+				Device:    virtualDisk,
+				Operation: types.VirtualDeviceConfigSpecOperationEdit,
+			}
+			config.FileOperation = ""
+			configSpec.DeviceChange = append(configSpec.DeviceChange, config)
+
+		}
 
 		// Removed disks
 		for _, diskRaw := range removedDisks.List() {
