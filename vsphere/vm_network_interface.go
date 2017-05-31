@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
 )
@@ -298,4 +300,78 @@ func buildNetworkDevice(f *find.Finder, n networkInterface) (*types.VirtualDevic
 	} else {
 		return nil, fmt.Errorf("Invalid network n.adapter type.")
 	}
+}
+
+func readNetworkData(mvm *mo.VirtualMachine, d *schema.ResourceData) error {
+	// TODO
+	networkInterfaces := make([]map[string]interface{}, 0)
+	for _, v := range mvm.Guest.Net {
+		if v.DeviceConfigId >= 0 {
+			log.Printf("[DEBUG] v.Network - %#v", v.Network)
+			networkInterface := make(map[string]interface{})
+			networkInterface["label"] = v.Network
+			networkInterface["mac_address"] = v.MacAddress
+			for _, ip := range v.IpConfig.IpAddress {
+				p := net.ParseIP(ip.IpAddress)
+				if p.To4() != nil {
+					log.Printf("[DEBUG] p.String - %#v", p.String())
+					log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
+					networkInterface["ipv4_address"] = p.String()
+					networkInterface["ipv4_prefix_length"] = ip.PrefixLength
+				} else if p.To16() != nil {
+					log.Printf("[DEBUG] p.String - %#v", p.String())
+					log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
+					networkInterface["ipv6_address"] = p.String()
+					networkInterface["ipv6_prefix_length"] = ip.PrefixLength
+				}
+				log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
+			}
+			log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
+			networkInterfaces = append(networkInterfaces, networkInterface)
+		}
+	}
+	if mvm.Guest.IpStack != nil {
+		for _, v := range mvm.Guest.IpStack {
+			if v.IpRouteConfig != nil && v.IpRouteConfig.IpRoute != nil {
+				for _, route := range v.IpRouteConfig.IpRoute {
+					if route.Gateway.Device != "" {
+						gatewaySetting := ""
+						if route.Network == "::" {
+							gatewaySetting = "ipv6_gateway"
+						} else if route.Network == "0.0.0.0" {
+							gatewaySetting = "ipv4_gateway"
+						}
+						if gatewaySetting != "" {
+							deviceID, err := strconv.Atoi(route.Gateway.Device)
+							if len(networkInterfaces) == 1 {
+								deviceID = 0
+							}
+							if err != nil {
+								log.Printf("[WARN] error at processing %s of device id %#v: %#v", gatewaySetting, route.Gateway.Device, err)
+							} else {
+								log.Printf("[DEBUG] %s of device id %d: %s", gatewaySetting, deviceID, route.Gateway.IpAddress)
+								networkInterfaces[deviceID][gatewaySetting] = route.Gateway.IpAddress
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	log.Printf("[DEBUG] networkInterfaces: %#v", networkInterfaces)
+	err := d.Set("network_interface", networkInterfaces)
+	if err != nil {
+		return fmt.Errorf("Invalid network interfaces to set: %#v", networkInterfaces)
+	}
+
+	if len(networkInterfaces) > 0 {
+		if _, ok := networkInterfaces[0]["ipv4_address"]; ok {
+			log.Printf("[DEBUG] ip address: %v", networkInterfaces[0]["ipv4_address"].(string))
+			d.SetConnInfo(map[string]string{
+				"type": "ssh",
+				"host": networkInterfaces[0]["ipv4_address"].(string),
+			})
+		}
+	}
+	return nil
 }
