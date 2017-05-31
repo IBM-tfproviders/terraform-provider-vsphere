@@ -7,6 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
 )
@@ -104,52 +105,56 @@ func networkInterfaceSchema() *schema.Schema {
 	}
 }
 
-//func parseNetworkInterfaceData(nicList []interface{}) ([]networkInterface, error) {
-func parseNetworkInterfaceData(v interface{}) (networkInterface, error) {
-	network := v.(map[string]interface{})
-	var nic networkInterface
-	nic.label = network["label"].(string)
-	if v, ok := network["ip_address"].(string); ok && v != "" {
-		nic.ipv4Address = v
-	}
-	//if v, ok := d.GetOk("gateway"); ok {
-	//	nic.ipv4Gateway = v.(string)
-	//}
-	if v, ok := network["subnet_mask"].(string); ok && v != "" {
-		ip := net.ParseIP(v).To4()
-		if ip != nil {
-			mask := net.IPv4Mask(ip[0], ip[1], ip[2], ip[3])
-			pl, _ := mask.Size()
-			nic.ipv4PrefixLength = pl
-		} else {
-			return nic, fmt.Errorf("subnet_mask parameter is invalid.")
+func parseNetworkInterfaceData(vL []interface{}, vm *virtualMachine) error {
+	var networks []networkInterface
+	for _, v := range vL {
+		network := v.(map[string]interface{})
+		var nic networkInterface
+		nic.label = network["label"].(string)
+		if v, ok := network["ip_address"].(string); ok && v != "" {
+			nic.ipv4Address = v
 		}
+		//if v, ok := d.GetOk("gateway"); ok {
+		//	nic.ipv4Gateway = v.(string)
+		//}
+		if v, ok := network["subnet_mask"].(string); ok && v != "" {
+			ip := net.ParseIP(v).To4()
+			if ip != nil {
+				mask := net.IPv4Mask(ip[0], ip[1], ip[2], ip[3])
+				pl, _ := mask.Size()
+				nic.ipv4PrefixLength = pl
+			} else {
+				return fmt.Errorf("subnet_mask parameter is invalid.")
+			}
+		}
+		if v, ok := network["ipv4_address"].(string); ok && v != "" {
+			nic.ipv4Address = v
+		}
+		if v, ok := network["ipv4_prefix_length"].(int); ok && v != 0 {
+			nic.ipv4PrefixLength = v
+		}
+		if v, ok := network["ipv4_gateway"].(string); ok && v != "" {
+			nic.ipv4Gateway = v
+		}
+		if v, ok := network["ipv6_address"].(string); ok && v != "" {
+			nic.ipv6Address = v
+		}
+		if v, ok := network["ipv6_prefix_length"].(int); ok && v != 0 {
+			nic.ipv6PrefixLength = v
+		}
+		if v, ok := network["ipv6_gateway"].(string); ok && v != "" {
+			nic.ipv6Gateway = v
+		}
+		if v, ok := network["mac_address"].(string); ok && v != "" {
+			nic.macAddress = v
+		}
+		networks = append(networks, nic)
 	}
-	if v, ok := network["ipv4_address"].(string); ok && v != "" {
-		nic.ipv4Address = v
-	}
-	if v, ok := network["ipv4_prefix_length"].(int); ok && v != 0 {
-		nic.ipv4PrefixLength = v
-	}
-	if v, ok := network["ipv4_gateway"].(string); ok && v != "" {
-		nic.ipv4Gateway = v
-	}
-	if v, ok := network["ipv6_address"].(string); ok && v != "" {
-		nic.ipv6Address = v
-	}
-	if v, ok := network["ipv6_prefix_length"].(int); ok && v != 0 {
-		nic.ipv6PrefixLength = v
-	}
-	if v, ok := network["ipv6_gateway"].(string); ok && v != "" {
-		nic.ipv6Gateway = v
-	}
-	if v, ok := network["mac_address"].(string); ok && v != "" {
-		nic.macAddress = v
-	}
-	return nic, nil
+	vm.networkInterfaces = networks
+	return nil
 }
 
-func (n *networkInterface) buildNetworkConfig() (types.CustomizationAdapterMapping, error) {
+func buildNetworkConfig(n networkInterface) (types.CustomizationAdapterMapping, error) {
 
 	var config types.CustomizationAdapterMapping
 	var ipSetting types.CustomizationIPSettings
@@ -200,8 +205,48 @@ func (n *networkInterface) buildNetworkConfig() (types.CustomizationAdapterMappi
 	return config, nil
 }
 
+func addNetworkDevices(networkDevices []types.BaseVirtualDeviceConfigSpec, newVM *object.VirtualMachine) error {
+
+	for _, dvc := range networkDevices {
+		err := newVM.AddDevice(
+			context.TODO(), dvc.GetVirtualDeviceConfigSpec().Device)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func populateNetworkDeviceAndConfig(vm *virtualMachine, f *find.Finder) ([]types.BaseVirtualDeviceConfigSpec, []types.CustomizationAdapterMapping, error) {
+	networkDevices := []types.BaseVirtualDeviceConfigSpec{}
+	networkConfigs := []types.CustomizationAdapterMapping{}
+	for _, network := range vm.networkInterfaces {
+		// network device ----- TODO
+		if vm.template == "" {
+			network.adapterType = "e1000"
+		} else {
+			network.adapterType = "vmxnet3"
+		}
+		nd, err := buildNetworkDevice(f, network)
+		if err != nil {
+			return networkDevices, networkConfigs, err
+		}
+		log.Printf("[DEBUG] network device: %+v", nd.Device)
+		networkDevices = append(networkDevices, nd)
+
+		if vm.template != "" { // TODO
+			config, err := buildNetworkConfig(network)
+			if err != nil {
+				return networkDevices, networkConfigs, err
+			}
+			networkConfigs = append(networkConfigs, config)
+		}
+	}
+	return networkDevices, networkConfigs, nil
+}
+
 // buildNetworkDevice builds VirtualDeviceConfigSpec for Network Device.
-func (n *networkInterface) buildNetworkDevice(f *find.Finder) (*types.VirtualDeviceConfigSpec, error) {
+func buildNetworkDevice(f *find.Finder, n networkInterface) (*types.VirtualDeviceConfigSpec, error) {
 	log.Printf("[DEBUG] network interface ======= %+v", n)
 	network, err := f.Network(context.TODO(), "*"+n.label)
 	if err != nil {

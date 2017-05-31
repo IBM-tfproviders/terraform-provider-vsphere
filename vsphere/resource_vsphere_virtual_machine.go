@@ -756,16 +756,11 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	}
 
 	if vL, ok := d.GetOk("network_interface"); ok {
-		var networks []networkInterface
-		for _, v := range vL.([]interface{}) {
-			network, err := parseNetworkInterfaceData(v)
-			if err != nil {
-				return err
-			}
-			networks = append(networks, network)
+		err := parseNetworkInterfaceData(vL.([]interface{}), &vm)
+		if err != nil {
+			return err
 		}
-		vm.networkInterfaces = networks
-		log.Printf("[DEBUG] network_interface init: %+v", networks)
+		log.Printf("[DEBUG] network_interface init: %+v", vm.networkInterfaces)
 	}
 
 	if vL, ok := d.GetOk("windows_opt_config"); ok {
@@ -1748,30 +1743,9 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 	log.Printf("[DEBUG] datastore: %#v", datastore)
 
 	// network
-	networkDevices := []types.BaseVirtualDeviceConfigSpec{}
-	networkConfigs := []types.CustomizationAdapterMapping{}
-	for _, network := range vm.networkInterfaces {
-		// network device ----- TODO
-		//var networkDeviceType string
-		if vm.template == "" {
-			network.adapterType = "e1000"
-		} else {
-			network.adapterType = "vmxnet3"
-		}
-		nd, err := network.buildNetworkDevice(finder)
-		if err != nil {
-			return err
-		}
-		log.Printf("[DEBUG] network device: %+v", nd.Device)
-		networkDevices = append(networkDevices, nd)
-
-		if vm.template != "" { // TODO
-			config, err := network.buildNetworkConfig()
-			if err != nil {
-				return err
-			}
-			networkConfigs = append(networkConfigs, config)
-		}
+	networkDevices, networkConfigs, err := populateNetworkDeviceAndConfig(vm, finder)
+	if err != nil {
+		return err
 	}
 	log.Printf("[DEBUG] network devices: %#v", networkDevices)
 	log.Printf("[DEBUG] network configs: %#v", networkConfigs)
@@ -1862,12 +1836,8 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		}
 	}
 	// Add Network devices
-	for _, dvc := range networkDevices {
-		err := newVM.AddDevice(
-			context.TODO(), dvc.GetVirtualDeviceConfigSpec().Device)
-		if err != nil {
-			return err
-		}
+	if err := addNetworkDevices(networkDevices, newVM); err != nil {
+		return err
 	}
 
 	// Create the cdroms if needed.
