@@ -49,12 +49,12 @@ func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 	resourceName := "vsphere_vds_portgroup." + pgName
 	defPortgroupType := string(types.DistributedVirtualPortgroupPortgroupTypeEarlyBinding)
 
-    config := fmt.Sprintf(testAccCheckVdsConf_min, pgName, pgName, pgDatacenter,
-					pgVdsName)
+	config := fmt.Sprintf(testAccCheckVdsConf_min, pgName, pgName, pgDatacenter,
+		pgVdsName)
 	log.Printf("[DEBUG] template config= %s", config)
 
-    configUpdate := fmt.Sprintf(testAccCheckVdsConf, pgName, pgName, pgDatacenter,
-					pgVdsName, defPortgroupType, "Updated by Terraform", 16)
+	configUpdate := fmt.Sprintf(testAccCheckVdsConf, pgName, pgName, pgDatacenter,
+		pgVdsName, defPortgroupType, "Updated by Terraform", 16)
 	log.Printf("[DEBUG] template configUpdate= %s", configUpdate)
 
 	resource.Test(t, resource.TestCase{
@@ -63,7 +63,7 @@ func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 		CheckDestroy: testAccCheckVdsPortGroupDestroy,
 		Steps: []resource.TestStep{
 			resource.TestStep{
-				Config: config, 
+				Config: config,
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(
 						resourceName, "portgroup_type", defPortgroupType),
@@ -71,8 +71,8 @@ func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 						resourceName, "description", "Created by Terraform"),
 				),
 			},
-            resource.TestStep{
-				Config: configUpdate, 
+			resource.TestStep{
+				Config: configUpdate,
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr(
 						resourceName, "portgroup_type", defPortgroupType),
@@ -82,7 +82,6 @@ func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 						resourceName, "num_ports", "16"),
 				),
 			},
-
 		},
 	})
 }

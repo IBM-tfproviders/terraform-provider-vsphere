@@ -1,10 +1,15 @@
+PKG_LIST=$(shell go list ./...)
+PROVIDER_NAME=terraform-provider-vsphere
+GIT_TAG=$(shell git describe --always --long --dirty)
+LD_FLAGS += " -X main.Version=${GIT_TAG} -X main.ProviderName=${PROVIDER_NAME}"
+
 deps:
 	go get github.com/hashicorp/terraform
 	go get github.com/vmware/govmomi
 	go get golang.org/x/net/context
 	
 build:
-	go build -o terraform-provider-vsphere main.go
+	go build -ldflags ${LD_FLAGS} -o $(PROVIDER_NAME) github.com/IBM-tfproviders/terraform-provider-vsphere
 
 all: deps build
 
@@ -14,6 +19,9 @@ testacc:
 
 fmt:
 	@echo "Running 'go fmt'..."
-	go fmt ./vsphere
+	go fmt $(PKG_LIST)
+
+clean:
+	rm -f terraform-provider-vsphere
 
 .PHONY: build 

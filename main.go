@@ -6,6 +6,7 @@ import (
 )
 
 func main() {
+	printBuildVersion()
 	plugin.Serve(&plugin.ServeOpts{
 		ProviderFunc: vsphere.Provider,
 	})
