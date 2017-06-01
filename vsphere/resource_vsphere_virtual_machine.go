@@ -391,11 +391,50 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 	}
 }
 
+func prepareVMforUpdate(d *schema.ResourceData) *virtualMachine {
+
+	vmUpdate := virtualMachine{
+		name: d.Get("name").(string),
+	}
+	setVMTemplate(d, &vmUpdate)
+
+	if v, ok := d.GetOk("skip_customization"); ok {
+		vmUpdate.skipCustomization = v.(bool)
+	}
+
+	if raw, ok := d.GetOk("dns_suffixes"); ok {
+		for _, v := range raw.([]interface{}) {
+			vmUpdate.dnsSuffixes = append(vmUpdate.dnsSuffixes, v.(string))
+		}
+	} else {
+		vmUpdate.dnsSuffixes = DefaultDNSSuffixes
+	}
+
+	if raw, ok := d.GetOk("dns_servers"); ok {
+		for _, v := range raw.([]interface{}) {
+			vmUpdate.dnsServers = append(vmUpdate.dnsServers, v.(string))
+		}
+	} else {
+		vmUpdate.dnsServers = DefaultDNSServers
+	}
+
+	if v, ok := d.GetOk("domain"); ok {
+		vmUpdate.domain = v.(string)
+	}
+	if v, ok := d.GetOk("time_zone"); ok {
+		vmUpdate.timeZone = v.(string)
+	}
+	return &vmUpdate
+}
+
 func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{}) error {
 	// flag if changes have to be applied
 	hasChanges := false
 	// flag if changes have to be done when powered off
 	rebootRequired := false
+	customizationReq := false
+	var identity_options types.BaseCustomizationIdentitySettings
+	var netConf []types.CustomizationAdapterMapping
 
 	// make config spec
 	configSpec := types.VirtualMachineConfigSpec{}
@@ -418,6 +457,33 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 	collector := property.DefaultCollector(client.Client)
 	if err := collector.RetrieveOne(context.TODO(), vm.Reference(), []string{"summary", "config"}, &mov); err != nil {
 		return err
+	}
+
+	// prepare VM struct for update
+	vmUpdate := prepareVMforUpdate(d)
+	oldVM := prepareVMforUpdate(d)
+
+	// Handle nic changes
+	if d.HasChange("network_interface") {
+
+		hasChanges = true
+
+		netUpdateMap := make(map[string]interface{})
+		netUpdateMap["rebootRequired"] = false
+		netUpdateMap["customizationReq"] = false
+		netUpdateMap["vmUpdate"] = vmUpdate
+		netUpdateMap["oldVM"] = oldVM
+		netUpdateMap["vmMO"] = vm
+
+		if nerr := handleNetworkUpdate(d, netUpdateMap, finder); nerr != nil {
+			return nerr
+		}
+
+		log.Printf("returned netUpdateMap: %+v", netUpdateMap)
+		netConf = netUpdateMap["netConf"].([]types.CustomizationAdapterMapping)
+		rebootRequired = netUpdateMap["rebootRequired"].(bool)
+		customizationReq = netUpdateMap["customizationReq"].(bool)
+		identity_options = netUpdateMap["identity_options"].(types.BaseCustomizationIdentitySettings)
 	}
 
 	hasCpuHotAddEnabled := *mov.Config.CpuHotAddEnabled
@@ -648,6 +714,13 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		}
 	}
 
+	if customizationReq {
+		log.Printf("[INFO] Customizing virtual machine: %s", d.Id())
+		if err := vmUpdate.customizeVm(vm, identity_options, netConf); err != nil {
+			return err
+		}
+	}
+
 	log.Printf("[INFO] Reconfiguring virtual machine: %s", d.Id())
 
 	task, err := vm.Reconfigure(context.TODO(), configSpec)
@@ -784,6 +857,8 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 		log.Printf("[DEBUG] windows config init: %v", winOpt)
 	}
 
+	setVMTemplate(d, &vm)
+
 	if vL, ok := d.GetOk("disk"); ok {
 		if diskSet, ok := vL.(*schema.Set); ok {
 
@@ -796,7 +871,6 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 					if v, ok := disk["name"].(string); ok && v != "" {
 						return fmt.Errorf("Cannot specify name of a template")
 					}
-					vm.template = v
 					if vm.hasBootableVmdk {
 						return fmt.Errorf("[ERROR] Only one bootable disk or template may be given")
 					}
@@ -892,6 +966,22 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	log.Printf("[INFO] Created virtual machine: %s", d.Id())
 
 	return resourceVSphereVirtualMachineRead(d, meta)
+}
+
+func setVMTemplate(d *schema.ResourceData, vm *virtualMachine) {
+
+	if vL, ok := d.GetOk("disk"); ok {
+		if diskSet, ok := vL.(*schema.Set); ok {
+
+			for _, value := range diskSet.List() {
+				disk := value.(map[string]interface{})
+
+				if v, ok := disk["template"].(string); ok && v != "" {
+					vm.template = v
+				}
+			}
+		}
+	}
 }
 
 func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{}) error {
@@ -1010,7 +1100,9 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 	}
 
 	// network
-	readNetworkData(&mvm, d)
+	if err := readNetworkData(&mvm, d); err != nil {
+		return err
+	}
 
 	var rootDatastore string
 	for _, v := range mvm.Datastore {
@@ -1875,28 +1967,10 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 				HwClockUTC: types.NewBool(true),
 			}
 		}
-
-		// create CustomizationSpec
-		customSpec := types.CustomizationSpec{
-			Identity: identity_options,
-			GlobalIPSettings: types.CustomizationGlobalIPSettings{
-				DnsSuffixList: vm.dnsSuffixes,
-				DnsServerList: vm.dnsServers,
-			},
-			NicSettingMap: networkConfigs,
-		}
-		log.Printf("[DEBUG] custom spec: %v", customSpec)
-
-		log.Printf("[DEBUG] VM customization starting")
-		taskb, err := newVM.Customize(context.TODO(), customSpec)
-		if err != nil {
+		// customize VM
+		if err := vm.customizeVm(newVM, identity_options, networkConfigs); err != nil {
 			return err
 		}
-		_, err = taskb.WaitForResult(context.TODO(), nil)
-		if err != nil {
-			return err
-		}
-		log.Printf("[DEBUG] VM customization finished")
 	}
 
 	if vm.hasBootableVmdk || vm.template != "" {
@@ -1922,5 +1996,32 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		}
 	}
 
+	return nil
+}
+
+func (vm *virtualMachine) customizeVm(newVM *object.VirtualMachine, identity_options types.BaseCustomizationIdentitySettings, networkConfigs []types.CustomizationAdapterMapping) error {
+
+	// create CustomizationSpec
+	customSpec := types.CustomizationSpec{
+		Identity: identity_options,
+		GlobalIPSettings: types.CustomizationGlobalIPSettings{
+			DnsSuffixList: vm.dnsSuffixes,
+			DnsServerList: vm.dnsServers,
+		},
+		NicSettingMap: networkConfigs,
+	}
+	log.Printf("[DEBUG] custom spec: %v", customSpec)
+
+	log.Printf("[DEBUG] VM customization starting")
+	taskb, err := newVM.Customize(context.TODO(), customSpec)
+	if err != nil {
+		log.Printf(err.Error())
+		return err
+	}
+	_, err = taskb.WaitForResult(context.TODO(), nil)
+	if err != nil {
+		return err
+	}
+	log.Printf("[DEBUG] VM customization finished")
 	return nil
 }
