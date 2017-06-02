@@ -8,7 +8,9 @@ import (
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/methods"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
 )
@@ -86,6 +88,7 @@ func resourceVSphereVApp() *schema.Resource {
 			"description": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
+				Default:  "Created by Terraform",
 			},
 			"uuid": &schema.Schema{
 				Type:     schema.TypeString,
@@ -115,7 +118,7 @@ func resourceVSphereVApp() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
-			"entity": &schema.Schema{
+			/*"entity": &schema.Schema{
 				Type:     schema.TypeSet,
 				Optional: true,
 				Elem: &schema.Resource{
@@ -167,7 +170,7 @@ func resourceVSphereVApp() *schema.Resource {
 						},
 					},
 				},
-			},
+			},*/
 			"template_vapp": &schema.Schema{
 				Type:     schema.TypeList,
 				Optional: true,
@@ -209,37 +212,34 @@ func resourceVSphereVApp() *schema.Resource {
 func resourceVSphereVAppCreate(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*govmomi.Client)
 
-	log.Printf("[DEBUG] resourceVSphereVAppCreate :: client : %#v", client)
 	log.Printf("[DEBUG] resourceVSphereVAppCreate :: ResourceData d: %#v", d)
 
 	// Construct vAPP Object with required Attributes
-	vapp := vApp{
-		d:    d,
-		c:    client,
-		name: d.Get("name").(string),
-	}
+
+	vapp, _ := NewVApp(d, client)
 
 	err := vapp.populateOptionalVAppAttributes(d)
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading Optional Input attributes: %s", err)
 		return err
 	}
 
 	err = vapp.populateVAppTemplate(d)
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading VApp Template attributes: %s", err)
 		return err
 	}
 
-	err = vapp.populateVAppEntities(d)
+	// To be un-commented when entity is supported
+	/*err = vapp.populateVAppEntities(d)
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading VApp Entity attributes: %s", err)
 		return err
-	}
+	}*/
 
 	err = vapp.populateVAppResourceAllocationInfo(d)
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading VApp Resource Allocation attributes: %s", err)
 		return err
 	}
 
@@ -249,22 +249,25 @@ func resourceVSphereVAppCreate(d *schema.ResourceData, meta interface{}) error {
 
 	err = vapp.calculateLocation()
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while finding resource location : %s", err)
 		return err
 	}
 
 	err = vapp.create()
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while creating VApp : %s", err)
 		return err
 	}
 
 	err = vapp.linkEntities()
 	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while updating VApp to add Entities : %s", err)
 		return err
 	}
-	d.SetId(vapp.name)
+
+	vAppPath := getVAppPath(d)
+	d.SetId(vAppPath)
+
 	return resourceVSphereVAppRead(d, meta)
 }
 
@@ -272,13 +275,36 @@ func resourceVSphereVAppRead(d *schema.ResourceData, meta interface{}) error {
 
 	log.Printf("[DEBUG] resourceVSphereVAppRead:: d : %#v", d)
 
-	d.Set("name", d.Get("name"))
+	client := meta.(*govmomi.Client)
+	dc, err := getDatacenter(client, d.Get("datacenter").(string))
+	if err != nil {
+		return err
+	}
 
-	log.Printf("[DEBUG] resourceVSphereVAppRead:: d : %#v", d)
+	finder := find.NewFinder(client.Client, true)
+	finder = finder.SetDatacenter(dc)
+
+	vapp, err := finder.VirtualApp(context.TODO(), d.Id())
+	if err != nil {
+		d.SetId("")
+		return nil
+	}
+
+	var mvapp mo.VirtualApp
+	collector := property.DefaultCollector(client.Client)
+	if err := collector.RetrieveOne(context.TODO(), vapp.Reference(), []string{"vAppConfig"}, &mvapp); err != nil {
+		return err
+	}
+
+	d.Set("uuid", mvapp.VAppConfig.InstanceUuid)
 
 	return nil
+
 }
+
 func resourceVSphereVAppUpdate(d *schema.ResourceData, meta interface{}) error {
+
+	log.Printf("[DEBUG] resourceVSphereVAppUpdate :: Operation Not Supported yet.")
 	return nil
 }
 
@@ -298,21 +324,25 @@ func resourceVSphereVAppDelete(d *schema.ResourceData, meta interface{}) error {
 
 	vapp, err := getCreatedVApp(d, finder)
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while finding VApp: %s", err)
 		return err
 	}
 
 	err = powerOffVApp(vapp)
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while powering Off VApp: %s", err)
 		return err
 	}
 
 	err = unLinkEntities(d, vapp)
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while updating VApp to remove Entities: %s", err)
 		return err
 	}
 
 	err = destroyVApp(vapp)
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while deleting VApp: %s", err)
 		return err
 	}
 
@@ -322,19 +352,21 @@ func resourceVSphereVAppDelete(d *schema.ResourceData, meta interface{}) error {
 
 }
 
+func NewVApp(d *schema.ResourceData, c *govmomi.Client) (*vApp, error) {
+
+	// Construct vAPP Object with required Attributes
+	vapp := &vApp{
+		d:    d,
+		c:    c,
+		name: d.Get("name").(string),
+	}
+
+	return vapp, nil
+}
+
 func getCreatedVApp(d *schema.ResourceData, f *find.Finder) (*object.VirtualApp, error) {
 
-	vAppName := d.Get("name").(string)
-	vAppPath := vAppName
-
-	if v, ok := d.GetOk("parent_vapp"); ok && v != "" {
-		vAppPath = vAppPathString(v.(string), vAppName)
-
-	} else if v, ok := d.GetOk("folder"); ok && v != "" {
-
-		vAppPath = vAppPathString(v.(string), vAppName)
-
-	}
+	vAppPath := getVAppPath(d)
 
 	log.Printf("[DEBUG] getCreatedVApp:: finding the Created VApp: %s", vAppPath)
 
@@ -348,6 +380,23 @@ func getCreatedVApp(d *schema.ResourceData, f *find.Finder) (*object.VirtualApp,
 	}
 
 	return vapp, nil
+
+}
+
+func getVAppPath(d *schema.ResourceData) string {
+
+	vAppName := d.Get("name").(string)
+	vAppPath := vAppName
+
+	if v, ok := d.GetOk("parent_vapp"); ok && v != "" {
+		vAppPath = vAppPathString(v.(string), vAppName)
+
+	} else if v, ok := d.GetOk("folder"); ok && v != "" {
+
+		vAppPath = vAppPathString(v.(string), vAppName)
+
+	}
+	return vAppPath
 
 }
 
