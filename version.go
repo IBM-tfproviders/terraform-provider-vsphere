@@ -4,12 +4,9 @@ import (
 	"log"
 )
 
-var Version string
+var Version string = "DEV"
 var ProviderName = "PROVIDER"
 
 func printBuildVersion() {
-	if Version == "" {
-		Version = "DEV"
-	}
-	log.Printf("[INFO] %s.Version: %s", ProviderName, Version)
+	log.Printf("[INFO] %s.Version: [%s].", ProviderName, Version)
 }

@@ -76,6 +76,8 @@ func resourceVSphereVApp() *schema.Resource {
 		Update: resourceVSphereVAppUpdate,
 		Delete: resourceVSphereVAppDelete,
 
+		SchemaVersion: 1,
+
 		Schema: map[string]*schema.Schema{
 			"name": &schema.Schema{
 				Type:     schema.TypeString,

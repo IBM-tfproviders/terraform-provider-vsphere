@@ -68,6 +68,8 @@ func resourceVSphereVdPortgroup() *schema.Resource {
 		Update: resourceVSphereVdPortgroupUpdate,
 		Delete: resourceVSphereVdPortgroupDelete,
 
+		SchemaVersion: 1,
+
 		Schema: map[string]*schema.Schema{
 			"datacenter": &schema.Schema{
 				Type:     schema.TypeString,
