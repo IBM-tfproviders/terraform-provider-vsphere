@@ -28,29 +28,17 @@ type networkInterface struct {
 	ipv6Gateway      string
 	adapterType      string // TODO: Make "adapter_type" argument
 	macAddress       string
+	deviceId         int32
 }
 
 func networkInterfaceSchema() *schema.Schema {
 
 	return &schema.Schema{
-		Type:     schema.TypeList,
+		Type:     schema.TypeSet,
 		Required: true,
 		ForceNew: false,
-		/*Set: func(v interface{}) int {
-			var buf bytes.Buffer
-			m := v.(map[string]interface{})
-			buf.WriteString(fmt.Sprintf("%s-", m["label"].(string)))
-
-			if v, ok := m["ipv4_address"]; ok {
-				buf.WriteString(fmt.Sprintf("%s-", v.(string)))
-			}
-
-			if v, ok := m["ipv4_gateway"]; ok {
-				buf.WriteString(fmt.Sprintf("%s-", v.(string)))
-			}
-
-			return hashcode.String(buf.String())
-		},*/
+		//Set: schema.HashResource,
+		Set: networkHash,
 		Elem: &schema.Resource{
 			Schema: map[string]*schema.Schema{
 				"label": &schema.Schema{
@@ -120,16 +108,20 @@ func networkInterfaceSchema() *schema.Schema {
 					Optional: true,
 					Computed: true,
 				},
+
+				"deviceId": &schema.Schema{
+					Type:     schema.TypeInt,
+					Optional: true,
+					Computed: true,
+				},
 			},
 		},
 	}
 }
 
-//func parseNetworkInterfaceData(vL *schema.Set, vm *virtualMachine) error {
-func parseNetworkInterfaceData(vL []interface{}, vm *virtualMachine) error {
+func parseNetworkInterfaceData(vL *schema.Set) (error, []networkInterface) {
 	var networks []networkInterface
-	//for _, v := range vL.List() {
-	for _, v := range vL {
+	for _, v := range vL.List() {
 		network := v.(map[string]interface{})
 		var nic networkInterface
 		nic.label = network["label"].(string)
@@ -146,7 +138,7 @@ func parseNetworkInterfaceData(vL []interface{}, vm *virtualMachine) error {
 				pl, _ := mask.Size()
 				nic.ipv4PrefixLength = pl
 			} else {
-				return fmt.Errorf("subnet_mask parameter is invalid.")
+				return fmt.Errorf("subnet_mask parameter is invalid."), nil
 			}
 		}
 		if v, ok := network["ipv4_address"].(string); ok && v != "" {
@@ -172,8 +164,7 @@ func parseNetworkInterfaceData(vL []interface{}, vm *virtualMachine) error {
 		}
 		networks = append(networks, nic)
 	}
-	vm.networkInterfaces = networks
-	return nil
+	return nil, networks
 }
 
 func networkHash(v interface{}) int {
@@ -241,13 +232,14 @@ func buildNetworkConfig(n networkInterface) (types.CustomizationAdapterMapping, 
 
 	// network config
 	config.Adapter = ipSetting
+	//config.MacAddress = n.macAddress
 	return config, nil
 }
 
-func addNetworkDevices(networkDevices []types.BaseVirtualDeviceConfigSpec, newVM *object.VirtualMachine) error {
+func addNetworkDevices(networkDevices []types.BaseVirtualDeviceConfigSpec, vmMO *object.VirtualMachine) error {
 
 	for _, dvc := range networkDevices {
-		err := newVM.AddDevice(
+		err := vmMO.AddDevice(
 			context.TODO(), dvc.GetVirtualDeviceConfigSpec().Device)
 		if err != nil {
 			return err
@@ -256,12 +248,12 @@ func addNetworkDevices(networkDevices []types.BaseVirtualDeviceConfigSpec, newVM
 	return nil
 }
 
-func populateNetworkDeviceAndConfig(vm *virtualMachine, f *find.Finder) ([]types.BaseVirtualDeviceConfigSpec, []types.CustomizationAdapterMapping, error) {
+func populateNetworkDeviceAndConfig(networkInterfaces []networkInterface, template string, f *find.Finder) ([]types.BaseVirtualDeviceConfigSpec, []types.CustomizationAdapterMapping, error) {
 	networkDevices := []types.BaseVirtualDeviceConfigSpec{}
 	networkConfigs := []types.CustomizationAdapterMapping{}
-	for _, network := range vm.networkInterfaces {
+	for _, network := range networkInterfaces {
 		// network device
-		if vm.template == "" {
+		if template == "" {
 			network.adapterType = "e1000"
 		} else {
 			network.adapterType = "vmxnet3"
@@ -273,7 +265,7 @@ func populateNetworkDeviceAndConfig(vm *virtualMachine, f *find.Finder) ([]types
 		log.Printf("[DEBUG] network device: %+v", nd.Device)
 		networkDevices = append(networkDevices, nd)
 
-		if vm.template != "" {
+		if template != "" {
 			config, err := buildNetworkConfig(network)
 			if err != nil {
 				return networkDevices, networkConfigs, err
@@ -281,6 +273,7 @@ func populateNetworkDeviceAndConfig(vm *virtualMachine, f *find.Finder) ([]types
 			networkConfigs = append(networkConfigs, config)
 		}
 	}
+	log.Printf("[DEBUG] returning networkDevices=%+v, networkConfigs=%+v", networkDevices, networkConfigs)
 	return networkDevices, networkConfigs, nil
 }
 
@@ -348,6 +341,7 @@ func readNetworkData(mvm *mo.VirtualMachine, d *schema.ResourceData) error {
 			networkInterface := make(map[string]interface{})
 			networkInterface["label"] = v.Network
 			networkInterface["mac_address"] = v.MacAddress
+			networkInterface["deviceId"] = v.DeviceConfigId
 			for _, ip := range v.IpConfig.IpAddress {
 				p := net.ParseIP(ip.IpAddress)
 				if p.To4() != nil {
@@ -415,62 +409,73 @@ func readNetworkData(mvm *mo.VirtualMachine, d *schema.ResourceData) error {
 
 func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, finder *find.Finder) error {
 
-	oldVM := netMap["oldVM"].(*virtualMachine)
-	vmUpdate := netMap["vmUpdate"].(*virtualMachine)
-	vm := netMap["vmMO"].(*object.VirtualMachine)
+	vmConf := netMap["vmUpdateConf"].(*virtualMachine)
+	vmMO := netMap["vmMO"].(*object.VirtualMachine)
 
 	var netDev []types.BaseVirtualDeviceConfigSpec
 	var netConf []types.CustomizationAdapterMapping
 	var identity_options types.BaseCustomizationIdentitySettings
 
 	oldNetInterfaces, newNetInterfaces := d.GetChange("network_interface")
-	oldNetSet := schema.NewSet(networkHash, oldNetInterfaces.([]interface{}))
-	newNetSet := schema.NewSet(networkHash, newNetInterfaces.([]interface{}))
+	oldNetSet := oldNetInterfaces.(*schema.Set)
+	newNetSet := newNetInterfaces.(*schema.Set)
 
-	addedNetSet := newNetSet.Difference(oldNetSet)
-	log.Printf("[DEBUG] addedNetSet = %+v", addedNetSet)
+	if oldNetSet.Len() > 0 {
 
-	err := parseNetworkInterfaceData(addedNetSet.List(), vmUpdate)
-	if err != nil {
-		return err
-	}
-	log.Printf("[DEBUG] network_interface init of added network interfaces: %+v", vmUpdate.networkInterfaces)
-	var er error
-	netDev, netConf, er = populateNetworkDeviceAndConfig(vmUpdate, finder)
-	if er != nil {
-		return er
-	}
-	log.Printf("[DEBUG] \n netDev: %+v \n netConf: %+v", netDev, netConf)
-
-	// Add Network devices
-	if err := addNetworkDevices(netDev, vm); err != nil {
-		return err
-	}
-	log.Printf("[DEBUG] added network devices!!")
-	log.Printf("[DEBUG] vmUpdate.skipCustomization=%v, vmUpdate.template=%v", vmUpdate.skipCustomization, vmUpdate.template)
-
-	if vmUpdate.skipCustomization || vmUpdate.template == "" {
-		log.Printf("[DEBUG] VM customization during update skipped")
-	} else {
-		identity_options = &types.CustomizationLinuxPrep{
-			HostName: &types.CustomizationFixedName{
-				Name: strings.Split(vmUpdate.name, ".")[0],
-			},
-			Domain:     vmUpdate.domain,
-			TimeZone:   vmUpdate.timeZone,
-			HwClockUTC: types.NewBool(true),
-		}
-		nerr := parseNetworkInterfaceData(newNetInterfaces.([]interface{}), oldVM)
-		if nerr != nil {
-			return nerr
+		devices, err := vmMO.Device(context.TODO())
+		if err != nil {
+			log.Printf("[ERROR] unable to retrieve devices from VM")
+			return err
 		}
 
-		netDev, netConf, er = populateNetworkDeviceAndConfig(oldVM, finder)
-		netMap["rebootRequired"] = true
-		netMap["customizationReq"] = true
-		netMap["identity_options"] = identity_options
-	}
-	netMap["netConf"] = netConf
+		for _, val := range oldNetSet.List() {
+			deletedNet := val.(map[string]interface{})
+			devId := deletedNet["deviceId"].(int)
 
+			deviceToDelete := devices.FindByKey(int32(devId))
+			err := vmMO.RemoveDevice(context.TODO(), false, deviceToDelete)
+			if err != nil {
+				return err
+			}
+
+		}
+	}
+
+	if newNetSet.Len() > 0 {
+		// populate the networkInterface struct
+		err, networkIntfData := parseNetworkInterfaceData(newNetSet)
+		if err != nil {
+			return err
+		}
+		var er error
+		netDev, netConf, er = populateNetworkDeviceAndConfig(networkIntfData, vmConf.template, finder)
+		if er != nil {
+			return er
+		}
+
+		// Add Network devices
+		if err := addNetworkDevices(netDev, vmMO); err != nil {
+			return err
+		}
+		log.Printf("[DEBUG] added network devices!!")
+
+		if vmConf.skipCustomization || vmConf.template == "" {
+			log.Printf("[DEBUG] VM customization during update skipped")
+		} else {
+			// update the device list
+			identity_options = &types.CustomizationLinuxPrep{
+				HostName: &types.CustomizationFixedName{
+					Name: strings.Split(vmConf.name, ".")[0],
+				},
+				Domain:     vmConf.domain,
+				TimeZone:   vmConf.timeZone,
+				HwClockUTC: types.NewBool(true),
+			}
+			netMap["rebootRequired"] = true
+			netMap["customizationReq"] = true
+			netMap["identity_options"] = identity_options
+			netMap["netConf"] = netConf
+		}
+	}
 	return nil
 }

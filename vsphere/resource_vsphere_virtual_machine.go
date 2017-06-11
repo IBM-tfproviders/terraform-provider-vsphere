@@ -393,38 +393,38 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 
 func prepareVMforUpdate(d *schema.ResourceData) *virtualMachine {
 
-	vmUpdate := virtualMachine{
+	vmUpdateConf := virtualMachine{
 		name: d.Get("name").(string),
 	}
-	setVMTemplate(d, &vmUpdate)
+	setVMTemplate(d, &vmUpdateConf)
 
 	if v, ok := d.GetOk("skip_customization"); ok {
-		vmUpdate.skipCustomization = v.(bool)
+		vmUpdateConf.skipCustomization = v.(bool)
 	}
 
 	if raw, ok := d.GetOk("dns_suffixes"); ok {
 		for _, v := range raw.([]interface{}) {
-			vmUpdate.dnsSuffixes = append(vmUpdate.dnsSuffixes, v.(string))
+			vmUpdateConf.dnsSuffixes = append(vmUpdateConf.dnsSuffixes, v.(string))
 		}
 	} else {
-		vmUpdate.dnsSuffixes = DefaultDNSSuffixes
+		vmUpdateConf.dnsSuffixes = DefaultDNSSuffixes
 	}
 
 	if raw, ok := d.GetOk("dns_servers"); ok {
 		for _, v := range raw.([]interface{}) {
-			vmUpdate.dnsServers = append(vmUpdate.dnsServers, v.(string))
+			vmUpdateConf.dnsServers = append(vmUpdateConf.dnsServers, v.(string))
 		}
 	} else {
-		vmUpdate.dnsServers = DefaultDNSServers
+		vmUpdateConf.dnsServers = DefaultDNSServers
 	}
 
 	if v, ok := d.GetOk("domain"); ok {
-		vmUpdate.domain = v.(string)
+		vmUpdateConf.domain = v.(string)
 	}
 	if v, ok := d.GetOk("time_zone"); ok {
-		vmUpdate.timeZone = v.(string)
+		vmUpdateConf.timeZone = v.(string)
 	}
-	return &vmUpdate
+	return &vmUpdateConf
 }
 
 func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{}) error {
@@ -460,8 +460,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 	}
 
 	// prepare VM struct for update
-	vmUpdate := prepareVMforUpdate(d)
-	oldVM := prepareVMforUpdate(d)
+	vmUpdateConf := prepareVMforUpdate(d)
 
 	// Handle nic changes
 	if d.HasChange("network_interface") {
@@ -471,8 +470,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		netUpdateMap := make(map[string]interface{})
 		netUpdateMap["rebootRequired"] = false
 		netUpdateMap["customizationReq"] = false
-		netUpdateMap["vmUpdate"] = vmUpdate
-		netUpdateMap["oldVM"] = oldVM
+		netUpdateMap["vmUpdateConf"] = vmUpdateConf
 		netUpdateMap["vmMO"] = vm
 
 		if nerr := handleNetworkUpdate(d, netUpdateMap, finder); nerr != nil {
@@ -716,7 +714,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 
 	if customizationReq {
 		log.Printf("[INFO] Customizing virtual machine: %s", d.Id())
-		if err := vmUpdate.customizeVm(vm, identity_options, netConf); err != nil {
+		if err := vmUpdateConf.customizeVm(vm, identity_options, netConf); err != nil {
 			return err
 		}
 	}
@@ -828,10 +826,11 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	}
 
 	if vL, ok := d.GetOk("network_interface"); ok {
-		err := parseNetworkInterfaceData(vL.([]interface{}), &vm)
+		err, networkintfData := parseNetworkInterfaceData(vL.(*schema.Set))
 		if err != nil {
 			return err
 		}
+		vm.networkInterfaces = networkintfData
 		log.Printf("[DEBUG] network_interface init: %+v", vm.networkInterfaces)
 	}
 
@@ -1766,7 +1765,7 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 	log.Printf("[DEBUG] datastore: %#v", datastore)
 
 	// network
-	networkDevices, networkConfigs, err := populateNetworkDeviceAndConfig(vm, finder)
+	networkDevices, networkConfigs, err := populateNetworkDeviceAndConfig(vm.networkInterfaces, vm.template, finder)
 	if err != nil {
 		return err
 	}
@@ -2012,7 +2011,7 @@ func (vm *virtualMachine) customizeVm(newVM *object.VirtualMachine, identity_opt
 	}
 	log.Printf("[DEBUG] custom spec: %v", customSpec)
 
-	log.Printf("[DEBUG] VM customization starting")
+	log.Printf("[DEBUG] VM customization start")
 	taskb, err := newVM.Customize(context.TODO(), customSpec)
 	if err != nil {
 		log.Printf(err.Error())
