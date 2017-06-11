@@ -477,7 +477,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 			return nerr
 		}
 
-		log.Printf("returned netUpdateMap: %+v", netUpdateMap)
+		log.Printf("[DEBUG] returned netUpdateMap: %+v", netUpdateMap)
 		netConf = netUpdateMap["netConf"].([]types.CustomizationAdapterMapping)
 		rebootRequired = netUpdateMap["rebootRequired"].(bool)
 		customizationReq = netUpdateMap["customizationReq"].(bool)

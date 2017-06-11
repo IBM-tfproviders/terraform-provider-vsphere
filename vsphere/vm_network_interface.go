@@ -262,7 +262,6 @@ func populateNetworkDeviceAndConfig(networkInterfaces []networkInterface, templa
 		if err != nil {
 			return networkDevices, networkConfigs, err
 		}
-		log.Printf("[DEBUG] network device: %+v", nd.Device)
 		networkDevices = append(networkDevices, nd)
 
 		if template != "" {
@@ -279,7 +278,6 @@ func populateNetworkDeviceAndConfig(networkInterfaces []networkInterface, templa
 
 // buildNetworkDevice builds VirtualDeviceConfigSpec for Network Device.
 func buildNetworkDevice(f *find.Finder, n networkInterface) (*types.VirtualDeviceConfigSpec, error) {
-	log.Printf("[DEBUG] network interface ======= %+v", n)
 	network, err := f.Network(context.TODO(), "*"+n.label)
 	if err != nil {
 		return nil, err
@@ -335,9 +333,7 @@ func buildNetworkDevice(f *find.Finder, n networkInterface) (*types.VirtualDevic
 func readNetworkData(mvm *mo.VirtualMachine, d *schema.ResourceData) error {
 	networkInterfaces := make([]map[string]interface{}, 0)
 	for _, v := range mvm.Guest.Net {
-		log.Printf("[DEBUG] v: %+v", v)
 		if v.DeviceConfigId >= 0 {
-			log.Printf("[DEBUG] v.Network - %#v", v.Network)
 			networkInterface := make(map[string]interface{})
 			networkInterface["label"] = v.Network
 			networkInterface["mac_address"] = v.MacAddress
@@ -355,9 +351,7 @@ func readNetworkData(mvm *mo.VirtualMachine, d *schema.ResourceData) error {
 					networkInterface["ipv6_address"] = p.String()
 					networkInterface["ipv6_prefix_length"] = ip.PrefixLength
 				}
-				log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
 			}
-			log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
 			networkInterfaces = append(networkInterfaces, networkInterface)
 		}
 	}
@@ -457,7 +451,7 @@ func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, 
 		if err := addNetworkDevices(netDev, vmMO); err != nil {
 			return err
 		}
-		log.Printf("[DEBUG] added network devices!!")
+		log.Printf("[DEBUG] successfully added network devices")
 
 		if vmConf.skipCustomization || vmConf.template == "" {
 			log.Printf("[DEBUG] VM customization during update skipped")
