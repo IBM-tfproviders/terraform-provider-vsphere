@@ -4,17 +4,15 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/terraform"
-	//"github.com/vmware/govmomi"
-	//"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/find"
 	//"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
-	//"golang.org/x/net/context"
+	"golang.org/x/net/context"
 )
 
 var (
@@ -23,6 +21,8 @@ var (
 )
 
 const (
+	defPortgroupType = string(types.DistributedVirtualPortgroupPortgroupTypeEarlyBinding)
+
 	testAccCheckVdsConf_min = `
 resource "vsphere_vds_portgroup" "%s" {
     portgroup_name = "%s"
@@ -44,10 +44,39 @@ resource "vsphere_vds_portgroup" "%s" {
 
 // Verify default values with minimum configuration
 //
-func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
-	pgName := "TFT_pg1"
+func TestAccVSphereVdsPortgroup_DefaultValues(t *testing.T) {
+	pgName := "TFT_DEFAULT"
 	resourceName := "vsphere_vds_portgroup." + pgName
-	defPortgroupType := string(types.DistributedVirtualPortgroupPortgroupTypeEarlyBinding)
+
+	config := fmt.Sprintf(testAccCheckVdsConf_min, pgName, pgName, pgDatacenter,
+		pgVdsName)
+	log.Printf("[DEBUG] template config= %s", config)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheckVdsPg(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckVdsPortGroupDestroy,
+		Steps: []resource.TestStep{
+			resource.TestStep{
+				Config: config,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(
+						resourceName, "portgroup_type", defPortgroupType),
+					resource.TestCheckResourceAttr(
+						resourceName, "description", "Created by Terraform"),
+					resource.TestCheckResourceAttr(
+						resourceName, "num_ports", "8"),
+				),
+			},
+		},
+	})
+}
+
+// Verify update operation.
+//
+func TestAccVSphereVdsPortgroup_UpdateOperation(t *testing.T) {
+	pgName := "TFT_UPDATE"
+	resourceName := "vsphere_vds_portgroup." + pgName
 
 	config := fmt.Sprintf(testAccCheckVdsConf_min, pgName, pgName, pgDatacenter,
 		pgVdsName)
@@ -65,8 +94,6 @@ func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 			resource.TestStep{
 				Config: config,
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr(
-						resourceName, "portgroup_type", defPortgroupType),
 					resource.TestCheckResourceAttr(
 						resourceName, "description", "Created by Terraform"),
 				),
@@ -87,58 +114,71 @@ func TestAccVSphereVdsPortgroupUpdate(t *testing.T) {
 }
 
 func testAccCheckVdsPortGroupDestroy(s *terraform.State) error {
-	//client := testAccProvider.Meta().(*govmomi.Client)
-	//finder := find.NewFinder(client.Client, true)
+	client := testAccProvider.Meta().(*govmomi.Client)
+	finder := find.NewFinder(client.Client, true)
 
 	for _, rs := range s.RootModule().Resources {
 		if rs.Type != "vsphere_vds_portgroup" {
 			continue
 		}
+
+		dc, err := finder.Datacenter(context.TODO(), rs.Primary.Attributes["datacenter"])
+		if err != nil {
+			return fmt.Errorf("error %s", err)
+		}
+
+		finder = finder.SetDatacenter(dc)
+
+		pgName := rs.Primary.Attributes["portgroup_name"]
+		netRef, netErr := finder.Network(context.TODO(), pgName)
+		if netErr != nil {
+			switch e := netErr.(type) {
+			case *find.NotFoundError:
+				fmt.Printf("Expected error received: %s\n", e.Error())
+				return nil
+			default:
+				fmt.Printf("finder.Network RETURNS:> netRef=%#v | e=%#v\n", netRef, e)
+				return netErr
+			}
+		} else {
+			if netRef != nil {
+				return fmt.Errorf("portgroup %s still exists", pgName)
+			} else {
+				log.Printf("portgroup %s already deleted.", pgName)
+				return nil
+			}
+		}
 	}
 
 	return nil
-
-}
-
-type vdsPgInput struct {
-	successCase bool
-	value       interface{}
-	expErr      string
-	expWarn     string
-}
-
-type vdsPgFnValidationObj struct {
-	paramName   string
-	validatorFn schema.SchemaValidateFunc
-	inoutList   []vdsPgInput
 }
 
 func TestAccVSphereVdsPortgroup_validatorFunc(t *testing.T) {
-	var validatorCases = []vdsPgFnValidationObj{
-		{paramName: "num_ports", validatorFn: validateNumPorts,
-			inoutList: []vdsPgInput{
+	var validatorCases = []attributeValueValidationTestSpec{
+		{name: "num_ports", validatorFn: validateNumPorts,
+			values: []attributeProperty{
 				{value: -1, expErr: "out of allowed range"},
 				{value: 0, successCase: true},
 				{value: 212, successCase: true},
 				{value: 8193, expErr: "out of allowed range"},
 			},
 		},
-		{paramName: "portgroup_type", validatorFn: validatePortgroupType,
-			inoutList: []vdsPgInput{
+		{name: "portgroup_type", validatorFn: validatePortgroupType,
+			values: []attributeProperty{
 				{value: "Unknown", expErr: "Supported values are"},
 				{value: string(types.DistributedVirtualPortgroupPortgroupTypeEarlyBinding), successCase: true},
 			},
 		},
-		{paramName: "vlan_id", validatorFn: validateVlanId,
-			inoutList: []vdsPgInput{
+		{name: "vlan_id", validatorFn: validateVlanId,
+			values: []attributeProperty{
 				{value: 4095, expErr: "is out of range"},
 				{value: -2, expErr: "is out of range"},
 				{value: 1, successCase: true},
 				{value: 4094, successCase: true},
 			},
 		},
-		{paramName: "vlan_range", validatorFn: validateVlanRange,
-			inoutList: []vdsPgInput{
+		{name: "vlan_range", validatorFn: validateVlanRange,
+			values: []attributeProperty{
 				{value: "a0jomadfadsf", expErr: "is in incorrect format"},
 				{value: "1-o", expErr: "is in incorrect format"},
 				{value: "10-20,A", expErr: "is in incorrect format"},
@@ -152,8 +192,8 @@ func TestAccVSphereVdsPortgroup_validatorFunc(t *testing.T) {
 				{value: "12-34,56,78-91", successCase: true},
 			},
 		},
-		{paramName: "type", validatorFn: validateVlanType,
-			inoutList: []vdsPgInput{
+		{name: "type", validatorFn: validateVlanType,
+			values: []attributeProperty{
 				{value: "Unknown", expErr: "Supported values are"},
 				{value: string(portgroupVlanTypeNone), successCase: true},
 				{value: string(portgroupVlanTypePVid), successCase: true},
@@ -161,42 +201,7 @@ func TestAccVSphereVdsPortgroup_validatorFunc(t *testing.T) {
 		},
 	}
 
-	for _, c := range validatorCases {
-
-		log.Printf("* Executing validator function for parameter: '%s'", c.paramName)
-
-		for _, inout := range c.inoutList {
-			var warns []string
-			var errors []error
-
-			log.Printf("Validating:> parameter:'%s' value:'%v'", c.paramName, inout.value)
-
-			warns, errors = c.validatorFn(inout.value, c.paramName)
-			// log.Printf("warns %s - errors %s", warns, errors)
-
-			if inout.successCase {
-				if len(errors) > 0 || len(warns) > 0 {
-					t.Fatalf("ParamValidationFailed: param '%s' value '%v' is not VALID.",
-						c.paramName, inout.value)
-				}
-
-			} else {
-				if errors != nil {
-					ok := strings.Contains(errors[0].Error(), inout.expErr)
-					if !ok {
-						t.Fatalf("ParamValidationFailed: '%s'. Expected ERROR '%v' not found.",
-							c.paramName, inout.expErr)
-					}
-				} else if warns != nil {
-					ok := strings.Contains(warns[0], inout.expErr)
-					if !ok {
-						t.Fatalf("ParamValidationFailed: '%s'. Expected WARNING '%v' not found.",
-							c.paramName, inout.expErr)
-					}
-				}
-			}
-		}
-	}
+	verifySchemaValidationFunctions(t, validatorCases)
 }
 
 func testAccPreCheckVdsPg(t *testing.T) {

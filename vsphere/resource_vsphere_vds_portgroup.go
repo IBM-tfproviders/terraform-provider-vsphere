@@ -139,7 +139,7 @@ func resourceVSphereVdPortgroup() *schema.Resource {
 func resourceVSphereVdPortgroupCreate(d *schema.ResourceData, meta interface{}) error {
 
 	client := meta.(*govmomi.Client)
-	pg, _ := NewVdPortgroup(d)
+	pg, _ := parsePortgroupData(d)
 
 	if err := validatePortgroupConfigs(pg); err != nil {
 		log.Printf("[ERROR] Configuration validation failed.")
@@ -147,11 +147,11 @@ func resourceVSphereVdPortgroupCreate(d *schema.ResourceData, meta interface{}) 
 	}
 	log.Printf("[INFO] creating vDS portgroup: %#v", pg)
 
-	netRef, err := findNetObjectByName(pg.datacenter, pg.vdsName, client)
+	vdsRef, err := findNetObjectByName(pg.datacenter, pg.vdsName, client)
 	if err != nil {
 		return err
 	}
-	vDS := netRef.(*object.DistributedVirtualSwitch)
+	vDS := vdsRef.(*object.DistributedVirtualSwitch)
 
 	pgSpec := types.DVPortgroupConfigSpec{
 		Description: pg.description,
@@ -186,7 +186,6 @@ func resourceVSphereVdPortgroupCreate(d *schema.ResourceData, meta interface{}) 
 		d.Set("datacenter", dcName)
 	}
 
-	//d.SetId(fmt.Sprintf(pgInventoryPath, pg.datacenter, pg.portgroupName))
 	return resourceVSphereVdPortgroupRead(d, meta)
 }
 
@@ -214,7 +213,7 @@ func resourceVSphereVdPortgroupRead(d *schema.ResourceData, meta interface{}) er
 
 func resourceVSphereVdPortgroupUpdate(d *schema.ResourceData, meta interface{}) error {
 
-	pg, _ := NewVdPortgroup(d)
+	pg, _ := parsePortgroupData(d)
 
 	if err := validatePortgroupConfigs(pg); err != nil {
 		log.Printf("[ERROR] Configuration validation failed.")
@@ -363,7 +362,7 @@ func findVdsPgByInventoryPath(d *schema.ResourceData, meta interface{}) (object.
 	return pgRef, nil
 }
 
-func NewVdPortgroup(d *schema.ResourceData) (*vdPortgroup, error) {
+func parsePortgroupData(d *schema.ResourceData) (*vdPortgroup, error) {
 	pg := &vdPortgroup{
 		vdsName:       d.Get("vds_name").(string),
 		portgroupName: d.Get("portgroup_name").(string),
