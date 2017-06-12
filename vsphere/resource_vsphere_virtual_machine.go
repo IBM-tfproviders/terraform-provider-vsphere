@@ -826,7 +826,7 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	}
 
 	if vL, ok := d.GetOk("network_interface"); ok {
-		err, networkintfData := parseNetworkInterfaceData(vL.(*schema.Set))
+		err, networkintfData := parseNetworkInterfaceData(vL.([]interface{}))
 		if err != nil {
 			return err
 		}

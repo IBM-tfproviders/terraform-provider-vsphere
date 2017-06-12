@@ -1,14 +1,12 @@
 package vsphere
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"net"
 	"strconv"
 	"strings"
 
-	"github.com/hashicorp/terraform/helper/hashcode"
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -34,11 +32,9 @@ type networkInterface struct {
 func networkInterfaceSchema() *schema.Schema {
 
 	return &schema.Schema{
-		Type:     schema.TypeSet,
+		Type:     schema.TypeList,
 		Required: true,
 		ForceNew: false,
-		//Set: schema.HashResource,
-		Set: networkHash,
 		Elem: &schema.Resource{
 			Schema: map[string]*schema.Schema{
 				"label": &schema.Schema{
@@ -111,7 +107,6 @@ func networkInterfaceSchema() *schema.Schema {
 
 				"deviceId": &schema.Schema{
 					Type:     schema.TypeInt,
-					Optional: true,
 					Computed: true,
 				},
 			},
@@ -119,9 +114,9 @@ func networkInterfaceSchema() *schema.Schema {
 	}
 }
 
-func parseNetworkInterfaceData(vL *schema.Set) (error, []networkInterface) {
+func parseNetworkInterfaceData(vL []interface{}) (error, []networkInterface) {
 	var networks []networkInterface
-	for _, v := range vL.List() {
+	for _, v := range vL {
 		network := v.(map[string]interface{})
 		var nic networkInterface
 		nic.label = network["label"].(string)
@@ -165,23 +160,6 @@ func parseNetworkInterfaceData(vL *schema.Set) (error, []networkInterface) {
 		networks = append(networks, nic)
 	}
 	return nil, networks
-}
-
-func networkHash(v interface{}) int {
-	var buf bytes.Buffer
-	m := v.(map[string]interface{})
-	buf.WriteString(fmt.Sprintf("%s-", m["label"].(string)))
-
-	if v, ok := m["ipv4_address"]; ok {
-		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
-	}
-
-	if v, ok := m["ipv4_gateway"]; ok {
-		buf.WriteString(fmt.Sprintf("%s-", v.(string)))
-	}
-
-	return hashcode.String(buf.String())
-
 }
 
 func buildNetworkConfig(n networkInterface) (types.CustomizationAdapterMapping, error) {
@@ -410,11 +388,11 @@ func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, 
 	var netConf []types.CustomizationAdapterMapping
 	var identity_options types.BaseCustomizationIdentitySettings
 
-	oldNetInterfaces, newNetInterfaces := d.GetChange("network_interface")
-	oldNetSet := oldNetInterfaces.(*schema.Set)
-	newNetSet := newNetInterfaces.(*schema.Set)
+	o, n := d.GetChange("network_interface")
+	oldNetInterfaces := o.([]interface{})
+	newNetInterfaces := n.([]interface{})
 
-	if oldNetSet.Len() > 0 {
+	if len(oldNetInterfaces) > 0 {
 
 		devices, err := vmMO.Device(context.TODO())
 		if err != nil {
@@ -422,7 +400,7 @@ func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, 
 			return err
 		}
 
-		for _, val := range oldNetSet.List() {
+		for _, val := range oldNetInterfaces {
 			deletedNet := val.(map[string]interface{})
 			devId := deletedNet["deviceId"].(int)
 
@@ -435,9 +413,9 @@ func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, 
 		}
 	}
 
-	if newNetSet.Len() > 0 {
+	if len(newNetInterfaces) > 0 {
 		// populate the networkInterface struct
-		err, networkIntfData := parseNetworkInterfaceData(newNetSet)
+		err, networkIntfData := parseNetworkInterfaceData(newNetInterfaces)
 		if err != nil {
 			return err
 		}
