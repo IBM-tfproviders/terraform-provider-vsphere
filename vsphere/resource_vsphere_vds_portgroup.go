@@ -175,7 +175,7 @@ func resourceVSphereVdPortgroupCreate(d *schema.ResourceData, meta interface{}) 
 
 	// Find the newly created object and set required fields.
 	//
-	netRef, err = findNetObjectByName(pg.datacenter, pg.portgroupName, client)
+	netRef, err := findNetObjectByName(pg.datacenter, pg.portgroupName, client)
 	dvsPortGrp := netRef.(*object.DistributedVirtualPortgroup)
 	d.SetId(dvsPortGrp.InventoryPath)
 
