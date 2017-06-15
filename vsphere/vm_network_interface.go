@@ -123,9 +123,6 @@ func parseNetworkInterfaceData(vL []interface{}) (error, []networkInterface) {
 		if v, ok := network["ip_address"].(string); ok && v != "" {
 			nic.ipv4Address = v
 		}
-		//if v, ok := d.GetOk("gateway"); ok {
-		//	nic.ipv4Gateway = v.(string)
-		//}
 		if v, ok := network["subnet_mask"].(string); ok && v != "" {
 			ip := net.ParseIP(v).To4()
 			if ip != nil {
@@ -220,6 +217,7 @@ func addNetworkDevices(networkDevices []types.BaseVirtualDeviceConfigSpec, vmMO 
 		err := vmMO.AddDevice(
 			context.TODO(), dvc.GetVirtualDeviceConfigSpec().Device)
 		if err != nil {
+			log.Printf("[ERROR] unable to add network device")
 			return err
 		}
 	}
@@ -407,6 +405,7 @@ func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, 
 			deviceToDelete := devices.FindByKey(int32(devId))
 			err := vmMO.RemoveDevice(context.TODO(), false, deviceToDelete)
 			if err != nil {
+				log.Printf("[ERROR] unable to remove device[%+v] from VM", deviceToDelete)
 				return err
 			}
 
@@ -417,16 +416,19 @@ func handleNetworkUpdate(d *schema.ResourceData, netMap map[string]interface{}, 
 		// populate the networkInterface struct
 		err, networkIntfData := parseNetworkInterfaceData(newNetInterfaces)
 		if err != nil {
+			log.Printf("[ERROR] unable to parse new network interface data")
 			return err
 		}
 		var er error
 		netDev, netConf, er = populateNetworkDeviceAndConfig(networkIntfData, vmConf.template, finder)
 		if er != nil {
+			log.Printf("[ERROR] unable to populate device and config information")
 			return er
 		}
 
 		// Add Network devices
 		if err := addNetworkDevices(netDev, vmMO); err != nil {
+			log.Printf("[ERROR] unable to add network device")
 			return err
 		}
 		log.Printf("[DEBUG] successfully added network devices")

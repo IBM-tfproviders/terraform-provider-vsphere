@@ -430,6 +430,8 @@ func prepareVMforUpdate(d *schema.ResourceData) *virtualMachine {
 func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{}) error {
 	// flag if changes have to be applied
 	hasChanges := false
+	// flag to mark cpu, memory or disk changes
+	cpuMemDiskHasChanges := false
 	// flag if changes have to be done when powered off
 	rebootRequired := false
 	customizationReq := false
@@ -496,6 +498,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 
 		configSpec.NumCPUs = newCPUsCount
 		hasChanges = true
+		cpuMemDiskHasChanges = true
 
 		if newCPUsCount < oldCPUsCount {
 			if hasCpuHotRemoveEnabled == false {
@@ -514,6 +517,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 
 		configSpec.MemoryMB = newMemoryMB
 		hasChanges = true
+		cpuMemDiskHasChanges = true
 
 		if hasMemoryHotAddEnabled == false {
 			rebootRequired = true
@@ -590,7 +594,7 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 			}
 			config.FileOperation = ""
 			configSpec.DeviceChange = append(configSpec.DeviceChange, config)
-
+			cpuMemDiskHasChanges = true
 		}
 
 		// Removed disks
@@ -712,6 +716,20 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		}
 	}
 
+	if cpuMemDiskHasChanges {
+		log.Printf("[INFO] Reconfiguring virtual machine: %s", d.Id())
+
+		task, err := vm.Reconfigure(context.TODO(), configSpec)
+		if err != nil {
+			log.Printf("[ERROR] %s", err)
+		}
+
+		err = task.Wait(context.TODO())
+		if err != nil {
+			log.Printf("[ERROR] %s", err)
+		}
+	}
+
 	if customizationReq {
 		log.Printf("[INFO] Customizing virtual machine: %s", d.Id())
 		if err := vmUpdateConf.customizeVm(vm, identity_options, netConf); err != nil {
@@ -719,20 +737,8 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		}
 	}
 
-	log.Printf("[INFO] Reconfiguring virtual machine: %s", d.Id())
-
-	task, err := vm.Reconfigure(context.TODO(), configSpec)
-	if err != nil {
-		log.Printf("[ERROR] %s", err)
-	}
-
-	err = task.Wait(context.TODO())
-	if err != nil {
-		log.Printf("[ERROR] %s", err)
-	}
-
 	if rebootRequired {
-		task, err = vm.PowerOn(context.TODO())
+		task, err := vm.PowerOn(context.TODO())
 		if err != nil {
 			return err
 		}
