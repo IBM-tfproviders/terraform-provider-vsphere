@@ -39,6 +39,11 @@ var diskFormatTypeList = []string{
 	string(types.VAppCloneSpecProvisioningTypeThick),
 }
 
+var startActionList = []string{
+	string(types.VAppAutoStartActionNone),
+	string(types.VAppAutoStartActionPowerOn),
+}
+
 var stopActionList = []string{
 	string(types.VAppAutoStartActionNone),
 	string(types.VAppAutoStartActionPowerOff),
@@ -58,14 +63,12 @@ type templateVApp struct {
 }
 
 type vAppEntity struct {
-	// Can't we store in a seprate variable types.VAppEntityConfigInfo so that it can be used directly
 	types.VAppEntityConfigInfo
 	name             string
 	entityType       string
 	entityFolderPath string
 	entityRPPath     string
 	entityMoid       string
-	entityRef        types.ManagedObjectReference
 	folder           string
 }
 
@@ -79,9 +82,8 @@ type vApp struct {
 	folder       string
 	parentVApp   string
 
-	// TODO we need to remove
-	memory types.ResourceAllocationInfo
-	cpu    types.ResourceAllocationInfo
+	memory types.BaseResourceAllocationInfo
+	cpu    types.BaseResourceAllocationInfo
 
 	vAppToClone  templateVApp
 	vAppEntities []vAppEntity
@@ -165,10 +167,6 @@ func resourceVSphereVApp() *schema.Resource {
 							Type:         schema.TypeString,
 							Required:     true,
 							ValidateFunc: validateEntityType,
-						},
-						"key": &schema.Schema{
-							Type:     schema.TypeString,
-							Computed: true,
 						},
 						"start_order": &schema.Schema{
 							Type:     schema.TypeInt,
@@ -256,28 +254,18 @@ func resourceVSphereVApp() *schema.Resource {
 }
 
 func resourceVSphereVAppCreate(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
 
-	log.Printf("[DEBUG] resourceVSphereVAppCreate :: ResourceData d: %#v", d)
+	// Construct vAPP Object with some required Attributes
+	vapp, err := constructVApp(d, meta.(*govmomi.Client))
+	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while creating vapp object: %s", err)
+		return err
+	}
+	log.Printf("[INFO] resourceVSphereVAppCreate :: Vapp : %s", vapp.name)
 
-	// Construct vAPP Object with required Attributes
-	vapp, _ := NewVApp(d, client)
-
-	err := vapp.populateOptionalVAppAttributes(d)
+	err = vapp.populateOptionalVAppAttributes(d)
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading Optional Input attributes: %s", err)
-		return err
-	}
-
-	// Populate Datacenter and finder
-	dc, err := getDatacenter(vapp.c, vapp.datacenter)
-	if err != nil {
-		return err
-	}
-	vapp.finder = find.NewFinder(vapp.c.Client, true)
-	vapp.finder = vapp.finder.SetDatacenter(dc)
-	vapp.dcFolders, err = dc.Folders(context.TODO())
-	if err != nil {
 		return err
 	}
 
@@ -287,13 +275,13 @@ func resourceVSphereVAppCreate(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
-	err = vapp.populateVAppEntities(d)
-	if err != nil {
-		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading VApp Entity attributes: %s", err)
-		return err
+	if vL, ok := d.GetOk("entity"); ok {
+		if entitySet, ok := vL.(*schema.Set); ok {
+			vapp.vAppEntities = vapp.populateVAppEntities(entitySet.List())
+		}
 	}
 
-	err = vapp.populateVAppResourceAllocationInfo(d)
+	err = vapp.populateVAppResourceAllocationInfo()
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while reading VApp Resource Allocation attributes: %s", err)
 		return err
@@ -313,332 +301,206 @@ func resourceVSphereVAppCreate(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
+	configSpec := types.VAppConfigSpec{}
+	configSpec.Annotation = vapp.description
+
 	if len(vapp.vAppEntities) > 0 {
-		err := addEntities(vapp.c, vapp.finder, vapp.createdVApp, vapp.vAppEntities)
+		err := vapp.addEntities(vapp.vAppEntities)
 		if err != nil {
 			log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while adding Entities into VApp: %s", err)
 			return err
 		}
-	}
-	log.Printf("[DEBUG] resourceVSphereVAppCreate :: vapp.vAppEntities : %#v", vapp.vAppEntities)
 
-	//err = vapp.updateEntities()
-	err = vapp.updateEntities(vapp.vAppEntities)
+		configSpec.EntityConfig = vapp.createEntityConfigInfo(vapp.vAppEntities)
+	}
+
+	err = vapp.updateVApp(configSpec)
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while updating VApp to modify Entities : %s", err)
 		return err
 	}
 
-	err = powerOnVApp(vapp.createdVApp)
+	err = vapp.powerOnVApp()
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppCreate :: Error while Powering On VApp: %s", err)
 		return err
 	}
 
-	vAppPath := getVAppPath(d)
-	d.SetId(vAppPath)
-
-	//Back Populate folder and resourcepool path
-	entities := make([]map[string]interface{}, 0)
-	for i, vappEntity := range vapp.vAppEntities {
-		if vL, ok := d.GetOk("entity"); ok {
-			if entitySet, ok := vL.(*schema.Set); ok {
-				for _, value := range entitySet.List() {
-					entity := value.(map[string]interface{})
-					if entity["name"] == vappEntity.name && 
-                       getEntityType(entity["type"].(string)) == vappEntity.entityType {
-						entity["folder_path"] = vapp.vAppEntities[i].entityFolderPath
-						entity["resourcepool_path"] = vapp.vAppEntities[i].entityRPPath
-						entity["moid"] = vapp.vAppEntities[i].entityMoid
-						entities = append(entities, entity)
-						log.Printf("[DEBUG] entity : %#v", entity)
-					}
-				}
-			}
-		}
-	}
-	err = d.Set("entity", entities)
+	// Back Populate moid, folder and resourcepool path
+	err = vapp.backPopulateEntiy(vapp.vAppEntities)
 	if err != nil {
-		return fmt.Errorf("Invalid entity to set: %#v", entities)
-	}
-
-	// Read the Vapp properties
-	var mvapp mo.VirtualApp
-	collector := property.DefaultCollector(vapp.c.Client)
-	if err := collector.RetrieveOne(context.TODO(), vapp.createdVApp.Reference(), []string{"vAppConfig"}, &mvapp); err != nil {
 		return err
 	}
-	log.Printf("[DEBUG] mvapp: %#v", mvapp.VAppConfig.EntityConfig)
-	//var vmRef *types.ManagedObjectReference
-	for _, entities := range mvapp.VAppConfig.EntityConfig {
-		vmRef := entities.Key
-		log.Printf("[DEBUG] mvapp.vmRef: %#v", vmRef)
-		log.Printf("[DEBUG] mvapp.Key: %#v", entities.Key)
-	}
 
+	d.SetId(getVAppPath(d))
 	return resourceVSphereVAppRead(d, meta)
 }
 
 func resourceVSphereVAppRead(d *schema.ResourceData, meta interface{}) error {
 
-	log.Printf("[DEBUG] resourceVSphereVAppRead:: d : %#v", d)
-
-	client := meta.(*govmomi.Client)
-	dc, err := getDatacenter(client, d.Get("datacenter").(string))
+	vapp, err := constructVApp(d, meta.(*govmomi.Client))
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppRead :: Error while reading vapp object: %s", err)
 		return err
 	}
+	log.Printf("[INFO] resourceVSphereVAppRead:: Vapp : %s", vapp.name)
 
-	finder := find.NewFinder(client.Client, true)
-	finder = finder.SetDatacenter(dc)
-
-	vapp, err := finder.VirtualApp(context.TODO(), d.Id())
+	vapp.createdVApp, err = getCreatedVApp(d, vapp.finder)
 	if err != nil {
 		d.SetId("")
 		return nil
 	}
 
 	var mvapp mo.VirtualApp
-	collector := property.DefaultCollector(client.Client)
-	if err := collector.RetrieveOne(context.TODO(), vapp.Reference(), []string{"vAppConfig"}, &mvapp); err != nil {
+	collector := property.DefaultCollector(vapp.c.Client)
+	if err := collector.RetrieveOne(context.TODO(), vapp.createdVApp.Reference(), []string{"vAppConfig"}, &mvapp); err != nil {
 		return err
 	}
 
 	d.Set("uuid", mvapp.VAppConfig.InstanceUuid)
 
 	return nil
-
 }
 
 func resourceVSphereVAppUpdate(d *schema.ResourceData, meta interface{}) error {
 
-	log.Printf("[DEBUG] resourceVSphereVAppUpdate :: Update Operation.")
-	client := meta.(*govmomi.Client)
-
-	log.Printf("[DEBUG] resourceVSphereVAppUpdate:: ResourceData d: %#v", d)
-
-	// Construct vAPP Object with required Attributes
-	vapp, _ := NewVApp(d, client)
-
-	dc, err := getDatacenter(client, d.Get("datacenter").(string))
+	// Construct vAPP Object with some required Attributes
+	vapp, err := constructVApp(d, meta.(*govmomi.Client))
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppUpdate :: Error while updating vapp object: %s", err)
 		return err
 	}
-	vapp.finder = find.NewFinder(vapp.c.Client, true)
-	vapp.finder = vapp.finder.SetDatacenter(dc)
+	log.Printf("[INFO] resourceVSphereVAppUpdate :: Vapp : %s", vapp.name)
+
 	vapp.createdVApp, err = getCreatedVApp(d, vapp.finder)
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppUpdate :: Error while finding VApp: %s", err)
 		return err
 	}
 
+	err = vapp.populateOptionalVAppAttributes(d)
+	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppUpdate :: Error while reading Optional Input attributes: %s", err)
+		return err
+	}
+
+	configSpec := types.VAppConfigSpec{}
+	var vappModifiedEntities []vAppEntity
+	var hasChange, backPopulate bool
+
 	if d.HasChange("entity") {
 		oldEntities, newEntities := d.GetChange("entity")
 		oldEntitySet := oldEntities.(*schema.Set)
 		newEntitySet := newEntities.(*schema.Set)
 
-		addedEntities := newEntitySet.Difference(oldEntitySet)
-		removedEntities := oldEntitySet.Difference(newEntitySet)
+		addedEntitySet := newEntitySet.Difference(oldEntitySet)
+		removedEntitySet := oldEntitySet.Difference(newEntitySet)
 
-		log.Printf("[DEBUG] addedEntities : %#v\n", addedEntities)
-		log.Printf("[DEBUG] removedEntities : %#v\n", removedEntities)
+		log.Printf("[DEBUG] addedEntitySet : %#v\n", addedEntitySet)
+		log.Printf("[DEBUG] removedEntitySet : %#v\n", removedEntitySet)
 
 		//Finding the Modifed Entities
-		modifiedEntities := make([]map[string]interface{}, 0)
-		for _, value := range addedEntities.List() {
+		var modifiedEntities []interface{}
+		for _, value := range addedEntitySet.List() {
 			addedEntity := value.(map[string]interface{})
-			for _, value := range removedEntities.List() {
+			for _, value := range removedEntitySet.List() {
 				removedEntity := value.(map[string]interface{})
 				if addedEntity["name"] == removedEntity["name"] && addedEntity["type"] == removedEntity["type"] {
 					log.Printf("[DEBUG] Mofifying the enity %#v", addedEntity)
-					addedEntities.Remove(addedEntity)
-					removedEntities.Remove(removedEntity)
+					addedEntitySet.Remove(addedEntity)
+					removedEntitySet.Remove(removedEntity)
 					addedEntity["moid"] = removedEntity["moid"]
 					addedEntity["folder_path"] = removedEntity["folder_path"]
 					addedEntity["resourcepool_path"] = removedEntity["resourcepool_path"]
 					modifiedEntities = append(modifiedEntities, addedEntity)
-					log.Printf("[DEBUG] Modifying the enity %#v after", addedEntity)
 					break
 				}
 			}
 		}
 
-		log.Printf("[DEBUG] addedEntities : %#v\n", addedEntities)
-		log.Printf("[DEBUG] removedEntities : %#v\n", removedEntities)
+		log.Printf("[DEBUG] addedEntities : %#v\n", addedEntitySet.List())
+		log.Printf("[DEBUG] removedEntities : %#v\n", removedEntitySet.List())
 		log.Printf("[DEBUG] modifiedEntities : %#v\n", modifiedEntities)
 
 		//Populate Added Entities
-		vappAddedEntities := []vAppEntity{}
-		for _, value := range addedEntities.List() {
-			entity := value.(map[string]interface{})
-			newEntity := vAppEntity{}
-
-			newEntity.name = entity["name"].(string)
-			newEntity.entityType = getEntityType(entity["type"].(string))
-
-			if v, ok := entity["folder"].(string); ok && v != "" {
-				newEntity.folder = v
-			}
-			if v, ok := entity["start_order"].(int); ok {
-				newEntity.StartOrder = int32(v)
-			}
-			if v, ok := entity["start_delay"].(int); ok && v != 0 {
-				newEntity.StartDelay = int32(v)
-			}
-			if v, ok := entity["stop_delay"].(int); ok && v != 0 {
-				newEntity.StopDelay = int32(v)
-			}
-			if v, ok := entity["wait_for_guest"].(bool); ok {
-				newEntity.WaitingForGuest = &v
-			}
-			if v, ok := entity["start_action"].(string); ok && v != "" {
-				newEntity.StartAction = v
-			}
-			if v, ok := entity["stop_action"].(string); ok && v != "" {
-				newEntity.StopAction = v
-			}
-			vappAddedEntities = append(vappAddedEntities, newEntity)
-
-		}
-
-		log.Printf("[DEBUG] addedEntities : %#v\n", vappAddedEntities)
-		if addedEntities.Len() > 0 {
-			err := addEntities(vapp.c, vapp.finder, vapp.createdVApp, vappAddedEntities)
+		var vappAddedEntities []vAppEntity
+		if addedEntitySet.Len() > 0 {
+			vappAddedEntities = vapp.populateVAppEntities(addedEntitySet.List())
+			err := vapp.addEntities(vappAddedEntities)
 			if err != nil {
 				return err
 			}
-			log.Printf("[DEBUG] addedEntities after addition : %#v\n", vappAddedEntities)
 		}
 
-		if removedEntities.Len() > 0 {
-			err = removeEntities(vapp.c, removedEntities)
+		if removedEntitySet.Len() > 0 {
+			err = vapp.removeEntities(removedEntitySet)
 			if err != nil {
 				return err
 			}
 		}
 
 		//Populate Modified Entities
-		vappModifiedEntities := []vAppEntity{}
-		for _, entity := range modifiedEntities {
-			//entity := value.(map[string]interface{})
-			newEntity := vAppEntity{}
-
-			newEntity.name = entity["name"].(string)
-			newEntity.entityType = getEntityType(entity["type"].(string))
-
-			if v, ok := entity["folder"].(string); ok && v != "" {
-				newEntity.folder = v
-			}
-			if v, ok := entity["start_order"].(int); ok {
-				newEntity.StartOrder = int32(v)
-			}
-			if v, ok := entity["start_delay"].(int); ok && v != 0 {
-				newEntity.StartDelay = int32(v)
-			}
-			if v, ok := entity["stop_delay"].(int); ok && v != 0 {
-				newEntity.StopDelay = int32(v)
-			}
-			if v, ok := entity["wait_for_guest"].(bool); ok {
-				newEntity.WaitingForGuest = &v
-			}
-			if v, ok := entity["start_action"].(string); ok && v != "" {
-				newEntity.StartAction = v
-			}
-			if v, ok := entity["stop_action"].(string); ok && v != "" {
-				newEntity.StopAction = v
-			}
-			if v, ok := entity["moid"].(string); ok {
-				newEntity.entityMoid = v
-			}
-			if v, ok := entity["folder_path"].(string); ok && v != "" {
-				newEntity.entityFolderPath = v
-			}
-			if v, ok := entity["resourcepool_path"].(string); ok && v != "" {
-				newEntity.entityRPPath = v
-			}
-			vappModifiedEntities = append(vappModifiedEntities, newEntity)
-
-		}
-
+		//
+		vappModifiedEntities = vapp.populateVAppEntities(modifiedEntities)
 		log.Printf("[DEBUG] vappModifiedEntities : %#v\n", vappModifiedEntities)
 
+		//Added Modified Entities
 		for _, v := range vappAddedEntities {
 			vappModifiedEntities = append(vappModifiedEntities, v)
 		}
 
 		if len(vappModifiedEntities) > 0 {
-			err = vapp.updateEntities(vappModifiedEntities)
-			if err != nil {
-				return err
-			}
-		}
 
-		log.Printf("[DEBUG] vappModifiedEntities after append : %#v\n", vappModifiedEntities)
-		//Back Populate folder and resourcepool path
-		entities := make([]map[string]interface{}, 0)
-		if vL, ok := d.GetOk("entity"); ok {
-			if entitySet, ok := vL.(*schema.Set); ok {
-				for _, value := range entitySet.List() {
-					entity := value.(map[string]interface{})
-					log.Printf("[DEBUG] entity : %#v\n", entity)
-					added := 0
-					for _, vappEntity := range vappModifiedEntities {
-						if entity["name"] == vappEntity.name && getEntityType(entity["type"].(string)) == vappEntity.entityType { // Need to add folder also TODO
-							entity["folder_path"] = vappEntity.entityFolderPath
-							entity["resourcepool_path"] = vappEntity.entityRPPath
-							entity["moid"] = vappEntity.entityMoid
-							entities = append(entities, entity)
-							added = 1
-							break
-							log.Printf("[DEBUG] added disk updated")
-						}
-					}
-					if added == 0 {
-						log.Printf("[DEBUG] old disk updated")
-						entities = append(entities, entity)
-					}
-				}
-			}
-		}
-		err = d.Set("entity", entities)
-		if err != nil {
-			return fmt.Errorf("Invalid entity to set: %#v", entities)
+			hasChange = true
+			backPopulate = true
+			configSpec.EntityConfig = vapp.createEntityConfigInfo(vappModifiedEntities)
 		}
 	}
+
+	if d.HasChange("description") {
+		hasChange = true
+		configSpec.Annotation = vapp.description
+
+	}
+
+	if hasChange {
+		err = vapp.updateVApp(configSpec)
+		if err != nil {
+			return err
+		}
+	}
+
+	if backPopulate {
+		err = vapp.backPopulateEntiy(vappModifiedEntities)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
 func resourceVSphereVAppDelete(d *schema.ResourceData, meta interface{}) error {
 
-	client := meta.(*govmomi.Client)
-
-	log.Printf("[DEBUG] resourceVSphereVAppDelete:: ResourceData d: %#v", d)
-
-	dc, err := getDatacenter(client, d.Get("datacenter").(string))
+	// Construct vAPP Object with some required Attributes
+	vapp, err := constructVApp(d, meta.(*govmomi.Client))
 	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while deleting vapp object: %s", err)
 		return err
 	}
-	finder := find.NewFinder(client.Client, true)
-	finder = finder.SetDatacenter(dc)
-	if err != nil {
-		return err
-	}
-	createdVApp, err := getCreatedVApp(d, finder)
+
+	log.Printf("[INFO] resourceVSphereVAppDelete :: Vapp : %s", vapp.name)
+
+	vapp.createdVApp, err = getCreatedVApp(vapp.d, vapp.finder)
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while finding VApp: %s", err)
-		return err
-	}
-
-	err = powerOffVApp(createdVApp)
-	if err != nil {
-		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while powering Off VApp: %s", err)
 		return err
 	}
 
 	if vL, ok := d.GetOk("entity"); ok {
 		if entitySet, ok := vL.(*schema.Set); ok {
 			if entitySet.Len() > 0 {
-				err = removeEntities(client, entitySet)
+				err = vapp.removeEntities(entitySet)
 				if err != nil {
 					log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while removing entities from VApp: %s", err)
 					return err
@@ -647,7 +509,13 @@ func resourceVSphereVAppDelete(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
-	err = destroyVApp(createdVApp)
+	err = vapp.powerOffVApp()
+	if err != nil {
+		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while powering Off VApp: %s", err)
+		return err
+	}
+
+	err = vapp.destroyVApp()
 	if err != nil {
 		log.Printf("[ERROR] resourceVSphereVAppDelete :: Error while deleting VApp: %s", err)
 		return err
@@ -658,7 +526,7 @@ func resourceVSphereVAppDelete(d *schema.ResourceData, meta interface{}) error {
 	return nil
 }
 
-func NewVApp(d *schema.ResourceData, c *govmomi.Client) (*vApp, error) {
+func NewVApp(d *schema.ResourceData, c *govmomi.Client) *vApp {
 
 	// Construct vAPP Object with required Attributes
 	vapp := &vApp{
@@ -667,7 +535,7 @@ func NewVApp(d *schema.ResourceData, c *govmomi.Client) (*vApp, error) {
 		name: d.Get("name").(string),
 	}
 
-	return vapp, nil
+	return vapp
 }
 
 func getCreatedVApp(d *schema.ResourceData, f *find.Finder) (*object.VirtualApp, error) {
@@ -706,31 +574,24 @@ func getVAppPath(d *schema.ResourceData) string {
 
 }
 
-func powerOnVApp(vapp *object.VirtualApp) error {
+func (vapp *vApp) powerOnVApp() error {
 
-	task, err := vapp.PowerOn(context.TODO())
-	if err != nil {
+	// Read the Vapp properties to check if they have entities
+	var mvapp mo.VirtualApp
+	collector := property.DefaultCollector(vapp.c.Client)
+	if err := collector.RetrieveOne(context.TODO(), vapp.createdVApp.Reference(), []string{"vAppConfig"}, &mvapp); err != nil {
 		return err
 	}
-	err = task.Wait(context.TODO())
-	if err != nil {
-		return err
-	}
-	return nil
 
-}
-
-func powerOffVApp(vapp *object.VirtualApp) error {
-
-	task, err := vapp.PowerOff(context.TODO(), false)
-	if err != nil {
-		return err
-	}
-	err = task.Wait(context.TODO())
-	if err != nil {
+	if len(mvapp.VAppConfig.EntityConfig) > 0 {
+		log.Printf("[INFO] Vapp contains Entities to powerOn")
+		task, err := vapp.createdVApp.PowerOn(context.TODO())
+		if err != nil {
+			return err
+		}
 		err = task.Wait(context.TODO())
 		if err != nil {
-			// ignore if the vapp is already powered off
+			// ignore if the vapp is already powered on
 			if f, ok := err.(types.HasFault); ok {
 				switch f.Fault().(type) {
 				case *types.InvalidPowerState:
@@ -739,14 +600,37 @@ func powerOffVApp(vapp *object.VirtualApp) error {
 			}
 			return err
 		}
+	} else {
+		log.Printf("[INFO] Vapp doesn't contain any Entities to powerOn")
 	}
 	return nil
 
 }
 
-func destroyVApp(vapp *object.VirtualApp) error {
+func (vapp *vApp) powerOffVApp() error {
 
-	task, err := vapp.Destroy(context.TODO())
+	task, err := vapp.createdVApp.PowerOff(context.TODO(), false)
+	if err != nil {
+		return err
+	}
+	err = task.Wait(context.TODO())
+	if err != nil {
+		// ignore if the vapp is already powered off
+		if f, ok := err.(types.HasFault); ok {
+			switch f.Fault().(type) {
+			case *types.InvalidPowerState:
+				return nil
+			}
+		}
+		return err
+	}
+	return nil
+
+}
+
+func (vapp *vApp) destroyVApp() error {
+
+	task, err := vapp.createdVApp.Destroy(context.TODO())
 	if err != nil {
 		return err
 	}
@@ -988,17 +872,6 @@ func (vapp *vApp) cloneVApp() error {
 	if err != nil {
 		return err
 	}
-
-	/*	// Powering On the Created VirtualApp
-		task, err = vapp.createdVApp.PowerOn(context.TODO())
-		if err != nil {
-			log.Printf("[ERROR] Coundn't able to find the Created VApp: %s", vapp.name)
-			return err
-		}
-		err = task.Wait(context.TODO())
-		if err != nil {
-			return err
-		}*/
 	return nil
 }
 
@@ -1018,8 +891,8 @@ func (vapp *vApp) createVApp() error {
 	log.Printf("[DEBUG] Creating vapp via create api")
 
 	resSpec := new(types.ResourceConfigSpec)
-	resSpec.MemoryAllocation = createDefaultResourceAllocation()
-	resSpec.CpuAllocation = createDefaultResourceAllocation()
+	resSpec.MemoryAllocation = vapp.memory
+	resSpec.CpuAllocation = vapp.cpu
 
 	configSpec := types.VAppConfigSpec{}
 	folder := vapp.folderObj
@@ -1034,8 +907,7 @@ func (vapp *vApp) createVApp() error {
 	return err
 }
 
-func (vapp *vApp) updateEntities(vAppEntities []vAppEntity) error {
-	configSpec := types.VAppConfigSpec{}
+func (vapp *vApp) createEntityConfigInfo(vAppEntities []vAppEntity) []types.VAppEntityConfigInfo {
 	vappEntitiesConfigInfo := []types.VAppEntityConfigInfo{}
 	for _, vappEntity := range vAppEntities {
 		log.Printf("[DEBUG] vappEntity : %#v", vappEntity)
@@ -1054,7 +926,11 @@ func (vapp *vApp) updateEntities(vAppEntities []vAppEntity) error {
 		vappEntityConfigInfo.Key = &entityRef
 		vappEntitiesConfigInfo = append(vappEntitiesConfigInfo, vappEntityConfigInfo)
 	}
-	configSpec.EntityConfig = vappEntitiesConfigInfo
+	return vappEntitiesConfigInfo
+}
+
+func (vapp *vApp) updateVApp(configSpec types.VAppConfigSpec) error {
+
 	log.Printf("[DEBUG] configSpec : %#v", configSpec)
 	return vapp.createdVApp.UpdateConfig(context.TODO(), configSpec)
 }
@@ -1092,47 +968,49 @@ func (vapp *vApp) populateOptionalVAppAttributes(d *schema.ResourceData) error {
 	return nil
 }
 
-func (vapp *vApp) populateVAppEntities(d *schema.ResourceData) error {
+func (vapp *vApp) populateVAppEntities(entitySet []interface{}) []vAppEntity {
 
-	log.Printf("[DEBUG] populateVAppEntities called")
-	if vL, ok := d.GetOk("entity"); ok {
-		if entitySet, ok := vL.(*schema.Set); ok {
-			entities := []vAppEntity{}
-			for _, value := range entitySet.List() {
-				entity := value.(map[string]interface{})
-				newEntity := vAppEntity{}
+	entities := []vAppEntity{}
+	for _, value := range entitySet {
+		entity := value.(map[string]interface{})
+		newEntity := vAppEntity{}
 
-				newEntity.name = entity["name"].(string)
-				newEntity.entityType = getEntityType(entity["type"].(string))
+		newEntity.name = entity["name"].(string)
+		newEntity.entityType = getEntityType(entity["type"].(string))
 
-				if v, ok := entity["folder"].(string); ok && v != "" {
-					newEntity.folder = v
-				}
-				if v, ok := entity["start_order"].(int); ok {
-					newEntity.StartOrder = int32(v)
-				}
-				if v, ok := entity["start_delay"].(int); ok && v != 0 {
-					newEntity.StartDelay = int32(v)
-				}
-				if v, ok := entity["stop_delay"].(int); ok && v != 0 {
-					newEntity.StopDelay = int32(v)
-				}
-				if v, ok := entity["wait_for_guest"].(bool); ok {
-					newEntity.WaitingForGuest = &v
-				}
-				if v, ok := entity["start_action"].(string); ok && v != "" {
-					newEntity.StartAction = v
-				}
-				if v, ok := entity["stop_action"].(string); ok && v != "" {
-					newEntity.StopAction = v
-				}
-				entities = append(entities, newEntity)
-
-			}
-			vapp.vAppEntities = entities
+		if v, ok := entity["folder"].(string); ok && v != "" {
+			newEntity.folder = v
 		}
+		if v, ok := entity["start_order"].(int); ok {
+			newEntity.StartOrder = int32(v)
+		}
+		if v, ok := entity["start_delay"].(int); ok && v != 0 {
+			newEntity.StartDelay = int32(v)
+		}
+		if v, ok := entity["stop_delay"].(int); ok && v != 0 {
+			newEntity.StopDelay = int32(v)
+		}
+		if v, ok := entity["wait_for_guest"].(bool); ok {
+			newEntity.WaitingForGuest = &v
+		}
+		if v, ok := entity["start_action"].(string); ok && v != "" {
+			newEntity.StartAction = v
+		}
+		if v, ok := entity["stop_action"].(string); ok && v != "" {
+			newEntity.StopAction = v
+		}
+		if v, ok := entity["moid"].(string); ok {
+			newEntity.entityMoid = v
+		}
+		if v, ok := entity["folder_path"].(string); ok && v != "" {
+			newEntity.entityFolderPath = v
+		}
+		if v, ok := entity["resourcepool_path"].(string); ok && v != "" {
+			newEntity.entityRPPath = v
+		}
+		entities = append(entities, newEntity)
 	}
-	return nil
+	return entities
 }
 
 func (vapp *vApp) populateVAppTemplate(d *schema.ResourceData) error {
@@ -1172,9 +1050,10 @@ func (vapp *vApp) populateVAppTemplate(d *schema.ResourceData) error {
 	return nil
 }
 
-func (vapp *vApp) populateVAppResourceAllocationInfo(d *schema.ResourceData) error {
+func (vapp *vApp) populateVAppResourceAllocationInfo() error {
+	vapp.memory = createDefaultResourceAllocation()
+	vapp.cpu = createDefaultResourceAllocation()
 
-	log.Printf("[DEBUG] TBD.....")
 	return nil
 }
 
@@ -1233,7 +1112,7 @@ func validateStartAction(v interface{}, k string) (ws []string, errors []error) 
 	value := v.(string)
 	if value != string(types.VAppAutoStartActionNone) && value != string(types.VAppAutoStartActionPowerOn) {
 		errors = append(errors, fmt.Errorf(
-			"only '%s', and '%s' are supported values for 'start_action'", string(types.VAppAutoStartActionNone), string(types.VAppAutoStartActionPowerOn)))
+			"%s: Supported values are %s", k, strings.Join(startActionList, ", ")))
 	}
 	return
 }
@@ -1255,36 +1134,35 @@ func validateStopAction(v interface{}, k string) (ws []string, errors []error) {
 	return
 }
 
-func addEntities(c *govmomi.Client, finder *find.Finder, vapp *object.VirtualApp, vAppEntities []vAppEntity) error {
+func (vapp *vApp) addEntities(vAppEntities []vAppEntity) error {
 	//Get the Entities Object Ref
 	var entityList []types.ManagedObjectReference
 	for i, vappEntity := range vAppEntities {
 		entityFullName := vAppPathString(vappEntity.folder, vappEntity.name)
-		entityRef, entityPath, err := getEntityRef(finder, vappEntity.entityType, entityFullName)
+		entityRef, entityPath, err := getEntityRef(vapp.finder, vappEntity.entityType, entityFullName)
 		if err != nil {
 			return err
 		}
-		vAppEntities[i].entityRef = entityRef
 		vAppEntities[i].entityFolderPath = entityPath
 		vAppEntities[i].entityMoid = entityRef.Value
 		entityList = append(entityList, entityRef)
 		if vappEntity.entityType == vAppEntityTypeVm {
 			var mo mo.VirtualMachine
-			collector := property.DefaultCollector(c.Client)
+			collector := property.DefaultCollector(vapp.c.Client)
 			if err := collector.RetrieveOne(context.TODO(), entityRef, []string{"resourcePool"}, &mo); err != nil {
 				return err
 			}
 			log.Printf("[DEBUG] mo.ResourcePool : %#v", mo.ResourcePool)
-			Element, _ := finder.Element(context.TODO(), *mo.ResourcePool)
+			Element, _ := vapp.finder.Element(context.TODO(), *mo.ResourcePool)
 			vAppEntities[i].entityRPPath = Element.Path
 		} else if vappEntity.entityType == vAppEntityTypeVApp {
 			var mo mo.VirtualApp
-			collector := property.DefaultCollector(c.Client)
+			collector := property.DefaultCollector(vapp.c.Client)
 			if err := collector.RetrieveOne(context.TODO(), entityRef, []string{"parent"}, &mo); err != nil {
 				return err
 			}
 			log.Printf("[DEBUG] mo.Parent : %#v", mo.Parent)
-			Element, _ := finder.Element(context.TODO(), *mo.Parent)
+			Element, _ := vapp.finder.Element(context.TODO(), *mo.Parent)
 			vAppEntities[i].entityRPPath = Element.Path
 		} else {
 			return fmt.Errorf("vappEntity Type should be either vm or vapp")
@@ -1294,19 +1172,18 @@ func addEntities(c *govmomi.Client, finder *find.Finder, vapp *object.VirtualApp
 
 	// Creating the req for MoveIntoResourcePool
 	req := types.MoveIntoResourcePool{
-		This: vapp.Reference(),
+		This: vapp.createdVApp.Reference(),
 		List: entityList,
 	}
 	log.Printf("[DEBUG] addEntities : req %#v", req)
-	_, err := methods.MoveIntoResourcePool(context.TODO(), c, &req)
+	_, err := methods.MoveIntoResourcePool(context.TODO(), vapp.c, &req)
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
-func removeEntities(c *govmomi.Client, entitySet *schema.Set) error {
+func (vapp *vApp) removeEntities(entitySet *schema.Set) error {
 	for _, value := range entitySet.List() {
 		entity := value.(map[string]interface{})
 		entityType := getEntityType(entity["type"].(string))
@@ -1323,7 +1200,7 @@ func removeEntities(c *govmomi.Client, entitySet *schema.Set) error {
 		entityList = append(entityList, entityRef)
 
 		// Find Resource pool Reference
-		si := object.NewSearchIndex(c.Client)
+		si := object.NewSearchIndex(vapp.c.Client)
 		resourcePoolObjRef, err := si.FindByInventoryPath(
 			context.TODO(), entityRPPath)
 		if err != nil {
@@ -1338,13 +1215,13 @@ func removeEntities(c *govmomi.Client, entitySet *schema.Set) error {
 			This: resourcePoolRef,
 			List: entityList,
 		}
-		_, err = methods.MoveIntoResourcePool(context.TODO(), c, &req)
+		_, err = methods.MoveIntoResourcePool(context.TODO(), vapp.c, &req)
 		if err != nil {
 			return err
 		}
 
 		// Find Folder Reference
-		si = object.NewSearchIndex(c.Client)
+		si = object.NewSearchIndex(vapp.c.Client)
 		folderObjRef, err := si.FindByInventoryPath(
 			context.TODO(), entityFolderPath)
 		if err != nil {
@@ -1359,7 +1236,7 @@ func removeEntities(c *govmomi.Client, entitySet *schema.Set) error {
 			This: folderRef,
 			List: entityList,
 		}
-		_, err = methods.MoveIntoFolder_Task(context.TODO(), c, &reqf)
+		_, err = methods.MoveIntoFolder_Task(context.TODO(), vapp.c, &reqf)
 		if err != nil {
 			return err
 		}
@@ -1377,4 +1254,53 @@ func getEntityType(eType string) string {
 		return "UNKNOWN"
 	}
 
+}
+
+func (vapp *vApp) backPopulateEntiy(vAppEntities []vAppEntity) error {
+	var entities []interface{}
+	//entities := make([]map[string]interface{}, 0)
+	if vL, ok := vapp.d.GetOk("entity"); ok {
+		if entitySet, ok := vL.(*schema.Set); ok {
+			for _, value := range entitySet.List() {
+				entity := value.(map[string]interface{})
+				var added bool
+				for _, vappEntity := range vAppEntities {
+					if entity["name"] == vappEntity.name && getEntityType(entity["type"].(string)) == vappEntity.entityType { // Need to add folder also TODO
+						log.Printf("[DEBUG] Updating for entity : %s", vappEntity.name)
+						entity["folder_path"] = vappEntity.entityFolderPath
+						entity["resourcepool_path"] = vappEntity.entityRPPath
+						entity["moid"] = vappEntity.entityMoid
+						entities = append(entities, entity)
+						added = true
+						break
+					}
+				}
+				if !added {
+					entities = append(entities, entity)
+				}
+			}
+		}
+	}
+	err := vapp.d.Set("entity", entities)
+	if err != nil {
+		return fmt.Errorf("Invalid entity to set: %#v", entities)
+	}
+	return nil
+}
+
+func constructVApp(d *schema.ResourceData, client *govmomi.Client) (*vApp, error) {
+	// Creating and Populating vapp object with Client, ResourceData, Datacenter and finder
+	vapp := NewVApp(d, client)
+
+	dc, err := getDatacenter(client, d.Get("datacenter").(string))
+	if err != nil {
+		return nil, err
+	}
+	vapp.finder = find.NewFinder(client.Client, true)
+	vapp.finder = vapp.finder.SetDatacenter(dc)
+	vapp.dcFolders, err = dc.Folders(context.TODO())
+	if err != nil {
+		return nil, err
+	}
+	return vapp, nil
 }

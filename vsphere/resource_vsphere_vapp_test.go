@@ -5,16 +5,14 @@ import (
 	//"log"
 	"os"
 	"testing"
-
 	/*
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
-	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/find"
-	"github.com/vmware/govmomi/vim25/types"
-	"golang.org/x/net/context"
-	*/
-)
+		"github.com/hashicorp/terraform/helper/resource"
+		"github.com/hashicorp/terraform/terraform"
+		"github.com/vmware/govmomi"
+		"github.com/vmware/govmomi/find"
+		"github.com/vmware/govmomi/vim25/types"
+		"golang.org/x/net/context"
+	*/)
 
 func TestAccVSphereVapp_validatorFunc(t *testing.T) {
 	var validatorCases = []attributeValueValidationTestSpec{
@@ -22,21 +20,27 @@ func TestAccVSphereVapp_validatorFunc(t *testing.T) {
 			values: []attributeProperty{
 				{value: "vm", successCase: true},
 				{value: "vapp", successCase: true},
-				{value: "" , expErr: "Supported values are"},
-				{value: "VirtualMachine" , expErr: "Supported values are"},
-				{value: "VirtualApp" , expErr: "Supported values are"},
+				{value: "", expErr: "Supported values are"},
+				{value: "VirtualMachine", expErr: "Supported values are"},
+				{value: "VirtualApp", expErr: "Supported values are"},
 			},
 		},
 		{name: "start_action", validatorFn: validateStartAction,
 			values: []attributeProperty{
 				{value: "none", successCase: true},
 				{value: "powerOn", successCase: true},
+				{value: "Sleep", expErr: "Supported values are"},
+				{value: "powerOff", expErr: "Supported values are"},
 			},
 		},
 		{name: "stop_action", validatorFn: validateStopAction,
 			values: []attributeProperty{
 				{value: "none", successCase: true},
 				{value: "powerOff", successCase: true},
+				{value: "guestShutdown", successCase: true},
+				{value: "suspend", successCase: true},
+				{value: "powerOn", expErr: "Supported values are"},
+				{value: "unknown", expErr: "Supported values are"},
 			},
 		},
 	}
