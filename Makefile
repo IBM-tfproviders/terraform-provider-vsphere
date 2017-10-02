@@ -6,7 +6,7 @@ LD_FLAGS += " -X main.Version=${GIT_TAG} -X main.ProviderName=${PROVIDER_NAME}"
 TPV:=$(shell cd ${GOPATH}/src/github.com/hashicorp/terraform && git describe)
 
 ifndef TERRAFORM_VERSION
-TERRAFORM_VERSION=v0.9.5
+TERRAFORM_VERSION=v0.9.9
 endif
 
 default: all

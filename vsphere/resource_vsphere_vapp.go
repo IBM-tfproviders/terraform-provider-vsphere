@@ -879,8 +879,8 @@ func createDefaultResourceAllocation() types.BaseResourceAllocationInfo {
 	var info types.BaseResourceAllocationInfo
 	info = new(types.ResourceAllocationInfo)
 	ra := info.GetResourceAllocationInfo()
-	ra.Reservation = 1
-	ra.Limit = -1
+	*ra.Reservation = 1
+	*ra.Limit = -1
 	ra.Shares = new(types.SharesInfo)
 	ra.Shares.Level = types.SharesLevelNormal
 	ra.ExpandableReservation = types.NewBool(true)
