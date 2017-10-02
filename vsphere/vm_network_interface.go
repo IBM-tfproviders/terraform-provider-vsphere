@@ -330,28 +330,34 @@ func readNetworkData(mvm *mo.VirtualMachine, d *schema.ResourceData) error {
 			}
 			networkInterfaces = append(networkInterfaces, networkInterface)
 		}
-	}
-	if mvm.Guest.IpStack != nil {
-		for _, v := range mvm.Guest.IpStack {
-			if v.IpRouteConfig != nil && v.IpRouteConfig.IpRoute != nil {
-				for _, route := range v.IpRouteConfig.IpRoute {
-					if route.Gateway.Device != "" {
-						gatewaySetting := ""
-						if route.Network == "::" {
-							gatewaySetting = "ipv6_gateway"
-						} else if route.Network == "0.0.0.0" {
-							gatewaySetting = "ipv4_gateway"
-						}
-						if gatewaySetting != "" {
-							deviceID, err := strconv.Atoi(route.Gateway.Device)
-							if len(networkInterfaces) == 1 {
-								deviceID = 0
+	}	
+	if len(networkInterfaces) > 0 {
+		if mvm.Guest.IpStack != nil {
+			for _, v := range mvm.Guest.IpStack {
+				if v.IpRouteConfig != nil && v.IpRouteConfig.IpRoute != nil {
+					for _, route := range v.IpRouteConfig.IpRoute {
+						if route.Gateway.Device != "" {
+							gatewaySetting := ""
+							if route.Network == "::" {
+								gatewaySetting = "ipv6_gateway"
+							} else if route.Network == "0.0.0.0" {
+								gatewaySetting = "ipv4_gateway"
 							}
-							if err != nil {
-								log.Printf("[WARN] error at processing %s of device id %#v: %#v", gatewaySetting, route.Gateway.Device, err)
-							} else {
-								log.Printf("[DEBUG] %s of device id %d: %s", gatewaySetting, deviceID, route.Gateway.IpAddress)
-								networkInterfaces[deviceID][gatewaySetting] = route.Gateway.IpAddress
+							if gatewaySetting != "" {
+								deviceID, err := strconv.Atoi(route.Gateway.Device)
+								if len(networkInterfaces) == 1 {
+									deviceID = 0
+								}
+								if err != nil {
+									log.Printf("[WARN] error at processing %s of device id %#v: %#v", gatewaySetting, route.Gateway.Device, err)
+								} else {
+									log.Printf("[DEBUG] %s of device id %d: %s", gatewaySetting, deviceID, route.Gateway.IpAddress)
+									// if the VM is shutdown, guest.net is unset (which results in an empty list of network interfaces),
+									// whereas guest.ipstack is set and an error condition is created when we try to update a non-existing interface
+									if (networkInterfaces[deviceID] != nil) {
+										networkInterfaces[deviceID][gatewaySetting] = route.Gateway.IpAddress
+									}							
+								}
 							}
 						}
 					}
